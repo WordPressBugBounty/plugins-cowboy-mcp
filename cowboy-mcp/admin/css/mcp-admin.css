@@ -1,0 +1,414 @@
+/* Cowboy MCP admin: design B2 "Console". Every class is cmcp-prefixed; nothing restyles WordPress chrome. */
+.wrap.cmcp {
+	--cmcp-surface: #fff; --cmcp-surface-2: #fafaf8; --cmcp-border: #e2e2dd; --cmcp-border-strong: #cfcfc9;
+	--cmcp-text: #1c201d; --cmcp-muted: #5a615c; --cmcp-faint: #6e746f; --cmcp-ink: #1c201d;
+	--cmcp-live: #24c65a; --cmcp-ok: #136b34; --cmcp-ok-bg: #e7f5eb; --cmcp-ok-border: #bfe3ca;
+	--cmcp-warn: #8a5600; --cmcp-warn-bg: #fdf3dc; --cmcp-warn-border: #f1dba6;
+	--cmcp-danger: #b3261e; --cmcp-danger-bg: #fdeeec; --cmcp-danger-border: #f2c4bf; --cmcp-info-bg: #eef1f6;
+	--cmcp-code-bg: #0b100c; --cmcp-code-text: #cfeedd; --cmcp-code-green: #3cf07a; --cmcp-code-dim: #8aa594;
+	--cmcp-radius: 8px; --cmcp-radius-sm: 6px;
+	--cmcp-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+	margin: 0; margin-inline-start: -20px; max-width: none; color: var(--cmcp-text); font-size: 14px; line-height: 1.5;
+}
+@media (max-width: 782px) { .wrap.cmcp { margin-inline-start: -10px; } }
+/* Admin notices (core, ours and third-party) that WordPress moves into the wrap. */
+.wrap.cmcp > div:not(.cmcp-head):not(.cmcp-body):not(.cmcp-offbar) { margin: 16px 32px 0; }
+.wrap.cmcp code, .cmcp-mono { font-family: var(--cmcp-mono); }
+/* Commands, keys, URLs and tool names read left-to-right even in an RTL admin (bidi would reorder their punctuation). */
+.wrap.cmcp code, .wrap.cmcp pre, .wrap.cmcp kbd, .cmcp-mono, .cmcp-tool, .cmcp-ver { direction: ltr; unicode-bidi: isolate; }
+.wrap.cmcp pre { text-align: left; }
+.wrap.cmcp [hidden] { display: none !important; }
+.wrap.cmcp :focus-visible { outline: 2px solid var(--cmcp-ink); outline-offset: 2px; box-shadow: none; }
+/* Core rings every focused link (a:focus box-shadow), so a clicked link shows it until the next page loads; keyboard focus keeps the ring above. */
+.wrap.cmcp a:focus:not(:focus-visible) { box-shadow: none; outline: none; }
+
+/* ── Header ── */
+.cmcp-head { background: var(--cmcp-surface); border-bottom: 1px solid var(--cmcp-border); padding: 18px 32px 0; }
+.cmcp-brand { display: flex; align-items: center; gap: 12px; min-height: 36px; flex-wrap: wrap; }
+.cmcp-logo { width: 32px; height: 32px; border-radius: 7px; image-rendering: pixelated; box-shadow: 0 0 0 1px rgba(0,0,0,.08); }
+.cmcp-name { font-size: 17px; font-weight: 600; }
+.cmcp-ver { font-size: 13px; color: var(--cmcp-muted); font-family: var(--cmcp-mono); }
+.cmcp-exceptions { margin-inline-start: auto; display: flex; gap: 8px; }
+.cmcp-xchip { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 11px; border-radius: 999px; font-size: 13px; font-weight: 600; border: 1px solid; text-decoration: none; transition: background-color .15s ease, border-color .15s ease, color .15s ease; }
+.cmcp-xchip svg { width: 14px; height: 14px; }
+.cmcp-xchip--red { background: var(--cmcp-danger-bg); border-color: var(--cmcp-danger-border); color: var(--cmcp-danger); }
+.cmcp-xchip--amber { background: var(--cmcp-warn-bg); border-color: var(--cmcp-warn-border); color: var(--cmcp-warn); }
+.cmcp-xchip--neutral { background: var(--cmcp-surface-2); border-color: var(--cmcp-border-strong); color: var(--cmcp-muted); font-weight: 500; }
+/* Hover/focus fill the pill with its tone colour instead of drawing a (square) outline ring. */
+.wrap.cmcp .cmcp-xchip--red:hover, .wrap.cmcp .cmcp-xchip--red:focus-visible { background: var(--cmcp-danger); border-color: var(--cmcp-danger); color: #fff; }
+.wrap.cmcp .cmcp-xchip--amber:hover, .wrap.cmcp .cmcp-xchip--amber:focus-visible { background: var(--cmcp-warn); border-color: var(--cmcp-warn); color: #fff; }
+.wrap.cmcp .cmcp-xchip--neutral:hover, .wrap.cmcp .cmcp-xchip--neutral:focus-visible { background: var(--cmcp-ink); border-color: var(--cmcp-ink); color: #fff; }
+/* Core's focused/active-link rule re-rounds links to 2px (the pill went square on click); pin the radius in every state. */
+.wrap.cmcp .cmcp-xchip:focus, .wrap.cmcp .cmcp-xchip:active, .wrap.cmcp .cmcp-xchip:focus-visible { outline: none; box-shadow: none; border-radius: 999px; }
+/* Keyboard focus: a ring that follows the pill (box-shadow honours border-radius; outline does not everywhere). */
+.wrap.cmcp .cmcp-xchip:focus-visible { outline: 2px solid transparent; box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--cmcp-ink); }
+.cmcp-tabs { display: flex; gap: 4px; margin-top: 12px; overflow-x: auto; }
+.cmcp-tab { padding: 10px 12px 12px; font-size: 14px; color: var(--cmcp-muted); text-decoration: none; position: relative; white-space: nowrap; }
+.cmcp-tab:hover, .cmcp-tab:focus { color: var(--cmcp-text); }
+/* Inset: .cmcp-tabs scrolls horizontally, which clips anything drawn outside a tab. */
+.wrap.cmcp .cmcp-tab:focus-visible { outline-offset: -2px; border-radius: 6px; }
+.cmcp-tab[aria-current="page"] { color: var(--cmcp-text); font-weight: 600; }
+.cmcp-tab[aria-current="page"]::after { content: ""; position: absolute; left: 12px; right: 12px; bottom: -1px; height: 2px; background: var(--cmcp-ink); border-radius: 2px; }
+.cmcp-offbar { display: flex; align-items: center; gap: 12px; background: var(--cmcp-danger); color: #fff; padding: 10px 32px; flex-wrap: wrap; }
+.cmcp-offbar .cmcp-btn { margin-inline-start: auto; background: #fff; color: var(--cmcp-danger); border-color: #fff; }
+.cmcp-body { padding: 22px 32px 40px; }
+.cmcp-lede { margin: 0 0 18px; color: var(--cmcp-muted); max-width: 90ch; }
+.cmcp-lede-row { display: flex; align-items: center; gap: 16px; margin: 0 0 18px; flex-wrap: wrap; }
+.cmcp-lede-row .cmcp-lede { margin: 0; }
+.cmcp-right { margin-inline-start: auto; display: flex; gap: 8px; align-items: center; }
+.cmcp-sub { color: var(--cmcp-muted); font-size: 13px; font-weight: 400; }
+
+/* ── Buttons ── */
+.wrap.cmcp .cmcp-btn { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; border-radius: var(--cmcp-radius-sm); border: 1px solid var(--cmcp-border-strong); background: var(--cmcp-surface); font-size: 14px; font-weight: 500; cursor: pointer; white-space: nowrap; text-decoration: none; color: var(--cmcp-text); line-height: 1; }
+.wrap.cmcp .cmcp-btn:hover { background: #f3f3f0; }
+.wrap.cmcp .cmcp-btn:disabled { opacity: .55; cursor: not-allowed; }
+.wrap.cmcp .cmcp-btn svg { width: 15px; height: 15px; }
+.wrap.cmcp .cmcp-btn--primary { background: var(--cmcp-ink); border-color: var(--cmcp-ink); color: #fff; }
+.wrap.cmcp .cmcp-btn--primary:hover { background: #000; color: #fff; }
+.wrap.cmcp .cmcp-btn--danger { color: var(--cmcp-danger); border-color: var(--cmcp-danger-border); }
+.wrap.cmcp .cmcp-btn--danger:hover { background: var(--cmcp-danger-bg); }
+.wrap.cmcp .cmcp-btn--danger-solid { background: var(--cmcp-danger); border-color: var(--cmcp-danger); color: #fff; }
+.wrap.cmcp .cmcp-btn--danger-solid:hover { background: #9a1f18; color: #fff; }
+.wrap.cmcp .cmcp-btn--sm { height: 28px; padding: 0 10px; font-size: 13px; }
+.wrap.cmcp .cmcp-btn--ghost { border-color: transparent; background: none; }
+.wrap.cmcp .cmcp-linkbtn { border: 0; background: none; padding: 0; color: var(--cmcp-text); text-decoration: underline; text-decoration-color: var(--cmcp-border-strong); text-underline-offset: 3px; cursor: pointer; font-size: inherit; }
+/* "Add to Claude" (connect flow): the form wraps one button; the org variant sits inline in a sentence. */
+.wrap.cmcp .cmcp-add-claude { display: inline; margin: 0; }
+.wrap.cmcp .cmcp-add-claude + p { margin-top: 10px; }
+.wrap.cmcp .cmcp-linkbtn svg { width: 12px; height: 12px; margin-inline-start: 3px; vertical-align: -1px; }
+.wrap.cmcp .cmcp-org-add { margin-top: 8px; }
+
+/* ── Cards, badges, dots, inputs ── */
+.cmcp-card { background: var(--cmcp-surface); border: 1px solid var(--cmcp-border); border-radius: var(--cmcp-radius); margin-bottom: 20px; }
+.cmcp-card-h { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--cmcp-border); min-height: 56px; box-sizing: border-box; flex-wrap: wrap; }
+.wrap.cmcp .cmcp-card-h h2 { font-size: 15px; font-weight: 600; margin: 0; padding: 0; }
+.cmcp-bdg { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; line-height: 18px; padding: 0 7px; border-radius: 4px; background: #efefeb; color: #3f4541; font-weight: 500; white-space: nowrap; }
+.cmcp-bdg--ok { background: var(--cmcp-ok-bg); color: var(--cmcp-ok); }
+.cmcp-bdg--warn { background: var(--cmcp-warn-bg); color: var(--cmcp-warn); }
+.cmcp-bdg--danger { background: var(--cmcp-danger-bg); color: var(--cmcp-danger); }
+.cmcp-bdg--outline { background: none; border: 1px solid var(--cmcp-border); line-height: 16px; }
+.cmcp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--cmcp-live); display: inline-block; flex: none; box-shadow: 0 0 0 3px rgba(36,198,90,.16); }
+.cmcp-dot--off { background: #b9bdb9; box-shadow: none; }
+.cmcp-dot--warn { background: #e0a21b; box-shadow: 0 0 0 3px rgba(224,162,27,.16); }
+.cmcp-dot--bad { background: #d93a2f; box-shadow: 0 0 0 3px rgba(217,58,47,.14); }
+.wrap.cmcp .cmcp-input { height: 34px; border: 1px solid var(--cmcp-border-strong); border-radius: var(--cmcp-radius-sm); padding: 0 10px; background-color: #fff; font-size: 14px; min-width: 0; box-shadow: none; margin: 0; box-sizing: border-box; min-height: 0; }
+/* WordPress 7 core forms set min-height: 40px (and a 38px select line-height) on fields; ours match the 34px buttons beside them.
+   background-color, not background: the shorthand would wipe core's select arrow. */
+.wrap.cmcp select.cmcp-input { line-height: normal; padding-inline-end: 24px; }
+.wrap.cmcp textarea.cmcp-input { height: auto; padding: 8px 10px; font-family: var(--cmcp-mono); font-size: 13px; width: 100%; resize: vertical; }
+.cmcp-formrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cmcp-icon-btn { border: 1px solid var(--cmcp-border); background: var(--cmcp-surface); border-radius: 5px; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; flex: none; color: var(--cmcp-muted); padding: 0; }
+.cmcp-icon-btn svg { width: 14px; height: 14px; }
+.cmcp-icon-btn.is-copied { color: var(--cmcp-ok); border-color: var(--cmcp-ok-border); }
+.cmcp-icon-btn.is-failed { color: var(--cmcp-danger); border-color: var(--cmcp-danger-border); }
+.cmcp-callout { padding: 10px 12px; border-radius: var(--cmcp-radius-sm); background: var(--cmcp-warn-bg); border: 1px solid var(--cmcp-warn-border); color: #5c3a00; font-size: 13px; margin: 8px 0; }
+.cmcp-callout p { margin: 0; }
+.cmcp-callout--warn { background: var(--cmcp-warn-bg); border-color: var(--cmcp-warn-border); }
+.wrap.cmcp .cmcp-blocked { position: relative; padding-right: 40px; margin: 0 0 18px; }
+.wrap.cmcp .cmcp-blocked p + p, .wrap.cmcp .cmcp-blocked p + form { margin-top: 6px; }
+.wrap.cmcp .cmcp-blocked-x { position: absolute; top: 6px; right: 8px; background: none; border: 0; font-size: 20px; cursor: pointer; line-height: 1; color: inherit; }
+.wrap.cmcp .cmcp-blocked .mcp-inline-form { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cmcp-callout--info { background: var(--cmcp-info-bg); border-color: #d8dee9; color: #2a3342; }
+
+/* ── Tables ── */
+/* position: relative keeps absolutely positioned descendants (core .screen-reader-text) inside the scroll box —
+   without it they escape and widen the whole page on narrow screens. */
+.cmcp-table-wrap { overflow-x: auto; position: relative; }
+/* The apps table holds dropdown menus; a scrolling wrapper would clip them. Its cells wrap instead. */
+.cmcp-table-wrap:has(.cmcp-apps) { overflow: visible; }
+.wrap.cmcp table.cmcp-t { width: 100%; border-collapse: collapse; font-size: 13.5px; border: 0; }
+.cmcp-t th { text-align: start; font-weight: 600; font-size: 12px; color: var(--cmcp-muted); padding: 9px 12px; border-bottom: 1px solid var(--cmcp-border); background: var(--cmcp-surface-2); white-space: nowrap; }
+.cmcp-t td { padding: 10px 12px; border-bottom: 1px solid var(--cmcp-border); vertical-align: middle; }
+.cmcp-t tbody tr:last-child td { border-bottom: 0; }
+.cmcp-t th:first-child, .cmcp-t td:first-child { padding-inline-start: 18px; }
+.cmcp-t th:last-child, .cmcp-t td:last-child { padding-inline-end: 18px; }
+.cmcp-t tbody tr:not(.cmcp-panel-row):not(.cmcp-detail):hover td { background: #fbfbf9; }
+.cmcp-t td.cmcp-mono, .cmcp-t .cmcp-tool { font-family: var(--cmcp-mono); font-size: 13px; }
+.cmcp-empty { padding: 18px; margin: 0; color: var(--cmcp-muted); }
+tr.cmcp-panel-row td { padding: 0 18px 14px; background: #fff; }
+
+/* ── Pager ── */
+.cmcp-pager { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--cmcp-muted); }
+.cmcp-pager [aria-disabled="true"] { opacity: .5; pointer-events: none; }
+
+/* ── In-page confirm (shared) ── */
+.cmcp-inline-confirm { display: flex; align-items: center; gap: 10px; border-radius: var(--cmcp-radius-sm); padding: 10px 12px; font-size: 13.5px; border: 1px solid #d8dee9; background: var(--cmcp-info-bg); color: #2a3342; margin: 8px 0; flex-wrap: wrap; }
+.cmcp-inline-confirm .cmcp-msg { flex: 1 1 260px; }
+.cmcp-inline-confirm--danger { background: var(--cmcp-danger-bg); border-color: var(--cmcp-danger-border); color: #6f1712; }
+.cmcp-inline-confirm--warn { background: var(--cmcp-warn-bg); border-color: var(--cmcp-warn-border); color: #5c3a00; }
+
+/* ── Connections ── */
+.cmcp-add { display: grid; grid-template-columns: 236px minmax(0, 1fr); }
+@media (max-width: 960px) { .cmcp-add { grid-template-columns: 1fr; } }
+.cmcp-chooser { border-inline-end: 1px solid var(--cmcp-border); padding: 10px 8px 14px; background: var(--cmcp-surface-2); border-end-start-radius: var(--cmcp-radius); display: flex; flex-direction: column; }
+.cmcp-grp { font-size: 12px; font-weight: 600; color: var(--cmcp-muted); padding: 10px 10px 6px; margin: 0; }
+.wrap.cmcp .cmcp-client { width: 100%; display: grid; grid-template-columns: 18px minmax(0, 1fr); column-gap: 10px; border: 1px solid transparent; background: none; border-radius: 6px; padding: 7px 10px; text-align: start; cursor: pointer; font-size: 14px; color: var(--cmcp-text); align-items: center; }
+/* Spans the name and the local-site hint, so the logo centres on both lines (no hint: the second row is empty, 0px). */
+.cmcp-client-ic { grid-row: 1 / span 2; }
+.cmcp-client-ic svg { width: 18px; height: 18px; color: var(--cmcp-muted); display: block; }
+.cmcp-hint { grid-column: 2; font-size: 12px; color: var(--cmcp-ok); line-height: 1.3; }
+.cmcp-hint--pub { color: var(--cmcp-warn); }
+.wrap.cmcp .cmcp-client:hover { background: #efefeb; }
+.wrap.cmcp .cmcp-client.mcp-conn-item--active { background: var(--cmcp-surface); border-color: var(--cmcp-border-strong); box-shadow: 0 1px 2px rgba(0,0,0,.05); font-weight: 600; }
+.cmcp-steps { padding: 4px 24px 18px; min-width: 0; }
+.cmcp-steps .mcp-client-panel { display: none; }
+.cmcp-steps .mcp-client-panel--active { display: block; }
+.cmcp-placeholder { padding: 40px 12px; text-align: center; color: var(--cmcp-muted); }
+.wrap.cmcp .cmcp-placeholder h3 { color: var(--cmcp-text); font-size: 15px; margin: 0 0 4px; }
+.cmcp-steps-head h3 { margin: 14px 0 6px; font-size: 16px; font-weight: 600; }
+.cmcp-step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 14px; padding: 14px 0; border-top: 1px solid var(--cmcp-border); }
+.cmcp-steps-head + .cmcp-step, .cmcp-callout + .cmcp-step { border-top: 0; }
+.cmcp-num { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--cmcp-border-strong); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: var(--cmcp-muted); background: var(--cmcp-surface); }
+.cmcp-step--done .cmcp-num { background: var(--cmcp-ok-bg); border-color: var(--cmcp-ok-border); color: var(--cmcp-ok); }
+.cmcp-step-body { min-width: 0; }
+.wrap.cmcp .cmcp-step-title { margin: 2px 0; font-size: 14px; font-weight: 600; }
+/* Instructions read in the full text colour; .description lines (asides) and collapsed options stay quieter. */
+.cmcp-step-body > p { margin: 0 0 10px; color: var(--cmcp-text); }
+.wrap.cmcp .cmcp-fields { margin: 8px 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; align-items: baseline; }
+.wrap.cmcp .cmcp-fields dt { font-weight: 600; }
+.wrap.cmcp .cmcp-fields dd { margin: 0; min-width: 0; }
+@media (max-width: 600px) { .wrap.cmcp .cmcp-fields { grid-template-columns: minmax(0, 1fr); gap: 2px; } .wrap.cmcp .cmcp-fields dd { margin-bottom: 8px; } }
+.wrap.cmcp .cmcp-step-body > p.description { color: var(--cmcp-muted); font-size: 13px; }
+.cmcp-step-body p code, .cmcp-step-body li code, .cmcp-callout code { font-size: 12.5px; background: #efefeb; border-radius: 4px; padding: 1px 5px; }
+.cmcp-term-wrap { border-radius: var(--cmcp-radius-sm); overflow: hidden; background: var(--cmcp-code-bg); margin: 4px 0 8px; }
+.cmcp-term-bar { display: flex; align-items: center; gap: 8px; height: 32px; padding-block: 0; padding-inline: 12px 6px; border-bottom: 1px solid #1d2a20; font-size: 12px; color: var(--cmcp-code-dim); font-family: var(--cmcp-mono); }
+.cmcp-lamp { width: 7px; height: 7px; border-radius: 50%; background: var(--cmcp-code-green); box-shadow: 0 0 6px rgba(60,240,122,.6); }
+.wrap.cmcp .cmcp-term-copy { margin-inline-start: auto; height: 24px; padding: 0 9px; font-size: 12px; border-radius: 5px; border: 1px solid #2b3a2f; background: #121a14; color: #cfeedd; cursor: pointer; }
+.wrap.cmcp .cmcp-term-copy.mcp-copy-btn--copied { color: var(--cmcp-code-green); }
+/* The default ink focus ring is invisible on the dark code bar and the red server-off bar. */
+.wrap.cmcp .cmcp-term-bar :focus-visible { outline-color: var(--cmcp-code-green); }
+.wrap.cmcp .cmcp-offbar :focus-visible { outline-color: #fff; }
+.wrap.cmcp pre.cmcp-term { background: var(--cmcp-code-bg); color: var(--cmcp-code-text); font-family: var(--cmcp-mono); font-size: 13px; line-height: 1.6; padding: 12px 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.cmcp-keybox { border: 1px solid var(--cmcp-ok-border); background: var(--cmcp-ok-bg); border-radius: var(--cmcp-radius-sm); padding: 10px 12px; }
+.cmcp-keybox-note { margin: 0 0 8px; color: var(--cmcp-ok); }
+/* "New connections" on the by-hand paths only: one line, not a box. */
+.wrap.cmcp .cmcp-conn-first { margin: 0 0 10px; }
+.wrap.cmcp .cmcp-conn-first p { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wrap.cmcp .cmcp-conn-first [data-mcp-lock-until] { font-variant-numeric: tabular-nums; }
+/* The test prompt: a copyable line instead of a terminal block. */
+/* Example prompt: reads as a quote, not as code (owner ask 2026-10-12). */
+.cmcp-prompt { display: flex; align-items: center; gap: 12px; border: 1px solid var(--cmcp-border); border-left: 3px solid var(--cmcp-ink); border-radius: var(--cmcp-radius-sm); background: var(--cmcp-surface); padding: 10px 10px 10px 14px; margin: 8px 0 0; max-width: 64ch; }
+.wrap.cmcp .cmcp-prompt code { display: block; flex: 1 1 auto; min-width: 0; font-family: inherit; font-style: italic; font-size: 13.5px; line-height: 1.5; background: none; padding: 0; color: var(--cmcp-text); overflow-wrap: normal; }
+.wrap.cmcp .cmcp-prompt code::before { content: "\201C"; color: var(--cmcp-faint); margin-right: 2px; }
+.wrap.cmcp .cmcp-prompt code::after { content: "\201D"; color: var(--cmcp-faint); margin-left: 2px; }
+.wrap.cmcp .cmcp-prompt .cmcp-icon-btn { width: 30px; height: 30px; border-radius: 6px; }
+.wrap.cmcp .cmcp-prompt .cmcp-icon-btn:hover, .wrap.cmcp .cmcp-prompt .cmcp-icon-btn:focus-visible { background: var(--cmcp-ink); border-color: var(--cmcp-ink); color: #fff; }
+/* The "… instead" options sit on one row; an open one takes the full width. */
+.cmcp-inline-sum { display: flex; gap: 12px; flex-wrap: wrap; }
+.wrap.cmcp .cmcp-inline-sum .mcp-local-details { margin: 6px 0 0; }
+.wrap.cmcp .cmcp-inline-sum .mcp-local-details[open] { flex-basis: 100%; }
+.cmcp-step-body .mcp-substeps { margin: 4px 0 0; padding: 0; counter-reset: cmcpsub; list-style: none; }
+.cmcp-step-body .mcp-substeps li { position: relative; padding-block: 4px; padding-inline: 28px 0; color: var(--cmcp-text); }
+.cmcp-step-body .mcp-substeps li::before { counter-increment: cmcpsub; content: counter(cmcpsub); position: absolute; inset-inline-start: 0; top: 5px; width: 19px; height: 19px; border-radius: 50%; border: 1px solid var(--cmcp-border-strong); font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; color: var(--cmcp-muted); }
+.wrap.cmcp .mcp-local-details { margin: 10px 0; }
+.wrap.cmcp .mcp-local-details > summary { cursor: pointer; font-size: 13px; color: var(--cmcp-muted); text-decoration: underline; text-decoration-color: var(--cmcp-border-strong); text-underline-offset: 3px; }
+.wrap.cmcp .mcp-local-details > summary:hover, .wrap.cmcp .mcp-local-details[open] > summary { color: var(--cmcp-text); }
+.wrap.cmcp .mcp-local-details-body { border: 1px solid var(--cmcp-border); border-radius: var(--cmcp-radius-sm); padding: 12px; margin-top: 8px; font-size: 13px; }
+.wrap.cmcp .cmcp-key-fallback-body .cmcp-step { padding-inline-start: 0 }
+.wrap.cmcp .cmcp-install { margin: 2px 0 }
+
+/* access (scope) */
+.cmcp-seg { display: inline-flex; border: 1px solid var(--cmcp-border-strong); border-radius: var(--cmcp-radius-sm); overflow: hidden; height: 34px; box-sizing: border-box; background: #fff; }
+.cmcp-seg-opt { display: flex; }
+.cmcp-seg-opt input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.cmcp-seg-opt span { display: flex; align-items: center; padding: 0 12px; font-size: 13px; color: var(--cmcp-muted); border-inline-start: 1px solid var(--cmcp-border); cursor: pointer; }
+.cmcp-seg-opt:first-child span { border-inline-start: 0; }
+.cmcp-seg-opt input:checked + span { background: #efefeb; color: var(--cmcp-text); font-weight: 600; }
+.cmcp-seg-opt input:focus-visible + span { outline: 2px solid var(--cmcp-ink); outline-offset: -2px; }
+.cmcp-seg-opt span { white-space: nowrap; }
+@media (max-width: 600px) {
+	/* Narrow panels: let whole options wrap to a second row instead of breaking a label mid-word. */
+	.cmcp-seg { flex-wrap: wrap; height: auto; min-height: 34px; max-width: 100%; }
+	.cmcp-seg-opt { flex: 1 1 auto; }
+	.cmcp-seg-opt span { flex: 1 1 auto; justify-content: center; min-height: 32px; padding: 0 10px; }
+}
+.cmcp-scope-select { margin: 0 0 10px; }
+/* In a field row the margin would lift the selector off the row's centre line. */
+.cmcp-formrow .cmcp-scope-select { margin: 0; }
+.cmcp-scope-bulk { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 13px; color: var(--cmcp-muted); }
+.cmcp-scope-bulk + .cmcp-scope-checklist { margin-top: 6px; }
+.cmcp-scope-checklist { max-height: 320px; overflow-y: auto; margin-top: 10px; border: 1px solid var(--cmcp-border); border-radius: var(--cmcp-radius-sm); background: var(--cmcp-surface-2); padding: 6px 12px; }
+.cmcp-scope-cat summary { cursor: pointer; padding: 5px 0; }
+.cmcp-scope-missing { padding: 8px 0 6px; border-top: 1px solid var(--cmcp-border); margin-top: 4px; }
+.cmcp-scope-missing-h { margin: 4px 0; font-weight: 600; color: var(--cmcp-warn); }
+.cmcp-scope-missing .mcp-scope-tool { display: block; margin: 2px 0; }
+.cmcp-scope-cat .mcp-scope-tool { display: block; margin-block: 2px; margin-inline: 24px 0; }
+.cmcp-scope-cat .mcp-scope-tool .description { color: var(--cmcp-muted); margin-inline-start: 4px; }
+.cmcp-scope-title { margin: 12px 0 8px; }
+
+/* connected apps */
+.cmcp-nm-cell { max-width: 360px; }
+.cmcp-nm { font-weight: 600; overflow-wrap: anywhere; }
+.cmcp-apps .cmcp-sub { font-size: 12.5px; overflow-wrap: anywhere; }
+.cmcp-seen { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.cmcp-actions { text-align: end; width: 40px; }
+.cmcp-menu { position: relative; display: inline-block; }
+.cmcp-kebab { list-style: none; border-radius: 5px; width: 28px; height: 28px; cursor: pointer; color: var(--cmcp-muted); display: inline-flex; align-items: center; justify-content: center; }
+.cmcp-kebab::-webkit-details-marker { display: none; }
+.cmcp-kebab svg { width: 16px; height: 16px; }
+.cmcp-kebab:hover { background: #efefeb; color: var(--cmcp-text); }
+.cmcp-menu-list { position: absolute; inset-inline-end: 0; top: 32px; background: #fff; border: 1px solid var(--cmcp-border); border-radius: var(--cmcp-radius-sm); box-shadow: 0 8px 24px rgba(0,0,0,.12); padding: 4px; z-index: 5; min-width: 160px; text-align: start; }
+.cmcp-menu-list form { margin: 0; }
+.wrap.cmcp .cmcp-menu-item { display: block; width: 100%; text-align: start; border: 0; background: none; padding: 7px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; color: var(--cmcp-text); }
+.wrap.cmcp .cmcp-menu-item:hover { background: #f3f3f0; }
+.wrap.cmcp .cmcp-menu-item--danger { color: var(--cmcp-danger); }
+/* Phones: drop the Created column and let badges / last-used wrap so six columns fit without widening the page. */
+@media (max-width: 600px) {
+	.cmcp-apps th:nth-child(4), .cmcp-apps td:nth-child(4) { display: none; }
+	.cmcp-apps th, .cmcp-apps .cmcp-seen, .cmcp-apps .cmcp-bdg { white-space: normal; }
+	.cmcp-apps th, .cmcp-apps td { padding-inline: 8px; }
+}
+
+/* doctor */
+.cmcp-doc-body { padding: 14px 18px 16px; }
+.cmcp-doc-body > p { margin: 0 0 12px; color: var(--cmcp-muted); }
+.cmcp-checks-group { margin: 16px 0 6px; font-weight: 600; }
+.cmcp-checks { list-style: none; margin: 0; padding: 0; border: 1px solid var(--cmcp-border); border-radius: var(--cmcp-radius-sm); }
+.cmcp-checks li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; column-gap: 10px; align-items: center; padding: 8px 12px; border-top: 1px solid var(--cmcp-border); margin: 0; }
+.cmcp-checks li:first-child { border-top: 0; }
+.cmcp-det { grid-column: 2 / 4; font-size: 13px; color: var(--cmcp-muted); margin-top: 3px; }
+.cmcp-fix { grid-column: 2 / 4; font-size: 13px; color: #5c3a00; background: var(--cmcp-warn-bg); border-radius: 4px; padding: 6px 8px; margin-top: 6px; }
+.cmcp-res { font-size: 12px; font-weight: 600; border-radius: 4px; padding: 0 7px; line-height: 18px; background: #efefeb; color: var(--cmcp-muted); }
+.cmcp-res--pass { background: var(--cmcp-ok-bg); color: var(--cmcp-ok); }
+.cmcp-res--warn { background: var(--cmcp-warn-bg); color: var(--cmcp-warn); }
+.cmcp-res--fail, .cmcp-res--error { background: var(--cmcp-danger-bg); color: var(--cmcp-danger); }
+.cmcp-doctor-summary { margin: 12px 0 0; font-weight: 600; }
+.wrap.cmcp .mcp-generate-form .cmcp-input { flex: 1 1 220px; max-width: 280px; }
+
+/* ── Activity ── */
+.cmcp-cp { display: flex; gap: 18px; align-items: center; padding: 14px 18px; flex-wrap: wrap; }
+.wrap.cmcp .cmcp-cp h2 { margin: 0; padding: 0; font-size: 15px; font-weight: 600; }
+.cmcp-cp p { margin: 2px 0 0; color: var(--cmcp-muted); font-size: 13.5px; }
+.cmcp-cp-form { margin-inline-start: auto; }
+.cmcp-cp + .cmcp-table-wrap { border-top: 1px solid var(--cmcp-border); }
+.cmcp-toolbar { display: flex; gap: 8px; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--cmcp-border); flex-wrap: wrap; margin: 0; }
+.cmcp-search { position: relative; flex: 0 1 280px; }
+.cmcp-search svg { position: absolute; inset-inline-start: 10px; top: 10px; width: 14px; height: 14px; color: var(--cmcp-faint); }
+.wrap.cmcp .cmcp-search input { width: 100%; padding-inline-start: 30px; }
+.cmcp-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.wrap.cmcp .cmcp-chip { height: 30px; border: 1px solid var(--cmcp-border-strong); border-radius: 999px; background: #fff; padding: 0 12px; font-size: 13px; color: var(--cmcp-muted); display: inline-flex; align-items: center; text-decoration: none; box-shadow: none; }
+.wrap.cmcp .cmcp-chip[aria-current="true"] { border-color: var(--cmcp-ink); color: var(--cmcp-text); background: #f3f3f0; font-weight: 600; }
+.wrap.cmcp select.cmcp-chip { padding-block: 0; padding-inline: 12px 24px; min-height: 30px; line-height: 28px; }
+.cmcp-toolbar .cmcp-right { font-size: 13px; color: var(--cmcp-muted); gap: 10px; }
+.cmcp-nowrap { white-space: nowrap; }
+.cmcp-rel { font-size: 12.5px; margin-inline-start: 6px; color: var(--cmcp-muted); white-space: nowrap; }
+.cmcp-rel a { color: var(--cmcp-text); text-underline-offset: 2px; }
+.cmcp-batchtag { display: block; font-size: 12px; color: var(--cmcp-muted); font-family: var(--cmcp-mono); }
+.cmcp-journal tr.is-undone td { color: var(--cmcp-faint); }
+.cmcp-journal tr.is-undone .cmcp-tool, .cmcp-journal tr.is-undone .cmcp-obj { text-decoration: line-through; text-decoration-color: rgba(0,0,0,.35); }
+.cmcp-journal tr.is-hl td { background: #eef7f0; }
+.cmcp-journal tr:target td { animation: cmcp-flash 1.4s ease-out; }
+@keyframes cmcp-flash { from { background: #d9efdf; } to { background: transparent; } }
+@media (prefers-reduced-motion: reduce) { .cmcp-journal tr:target td { animation: none; background: #eef7f0; } }
+/* break-word, not anywhere: `anywhere` lets the column shrink to one character and splits names mid-word. */
+.cmcp-obj { min-width: 10ch; max-width: 260px; overflow-wrap: break-word; }
+.cmcp-st { min-width: 160px; }
+.cmcp-reason { display: block; font-size: 12.5px; color: var(--cmcp-muted); line-height: 1.35; margin-top: 3px; }
+.cmcp-acts-cell { text-align: end; }
+.cmcp-acts { display: inline-flex; gap: 6px; }
+.cmcp-acts form { margin: 0; }
+.cmcp-conflict-card .cmcp-inline-confirm { margin: 0; }
+.cmcp-inline-confirm form { margin: 0; }
+
+/* ── Logs ── */
+.cmcp-filters { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; padding: 12px 14px; border-bottom: 1px solid var(--cmcp-border); margin: 0; }
+.cmcp-filters label { font-size: 12px; color: var(--cmcp-muted); display: flex; flex-direction: column; gap: 3px; }
+.wrap.cmcp .cmcp-filters .cmcp-input { font-size: 13px; }
+.cmcp-reset { align-self: flex-end; padding-bottom: 8px; }
+.cmcp-ev { font-family: var(--cmcp-mono); font-size: 12.5px; padding: 1px 7px; border-radius: 4px; background: #efefeb; }
+.cmcp-ev--err { background: var(--cmcp-warn-bg); color: var(--cmcp-warn); }
+.cmcp-ev--exc { background: var(--cmcp-danger-bg); color: var(--cmcp-danger); }
+.cmcp-ev--auth { background: var(--cmcp-info-bg); color: #2a3342; }
+.wrap.cmcp .cmcp-caret { border: 0; background: none; width: 22px; height: 22px; border-radius: 4px; cursor: pointer; color: var(--cmcp-muted); display: inline-flex; align-items: center; justify-content: center; margin: 0; margin-inline: -6px 2px; padding: 0; vertical-align: middle; }
+.cmcp-caret svg { width: 12px; height: 12px; transition: transform .15s; }
+tr.is-open .cmcp-caret svg { transform: rotate(90deg); }
+.rtl .wrap.cmcp .cmcp-caret svg { transform: scaleX(-1); }
+.rtl .wrap.cmcp tr.is-open .cmcp-caret svg { transform: rotate(90deg); }
+.cmcp-cspace { display: inline-block; width: 18px; }
+.cmcp-t tr.cmcp-detail td { padding-block: 0 14px; padding-inline: 40px 18px; background: var(--cmcp-surface-2); }
+tr.cmcp-detail pre.cmcp-term { font-size: 12.5px; max-height: 320px; overflow: auto; border-radius: var(--cmcp-radius-sm); }
+
+/* ── Settings ── */
+.cmcp-settings { max-width: 880px; }
+.cmcp-sect { margin-bottom: 28px; }
+.wrap.cmcp .cmcp-sect > h2 { font-size: 17px; font-weight: 600; margin: 0 0 4px; padding: 0; }
+.cmcp-sect > p { margin: 0 0 12px; color: var(--cmcp-muted); }
+.cmcp-sect > .cmcp-card { margin-bottom: 0; }
+.cmcp-srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 24px; padding: 16px 18px; border-top: 1px solid var(--cmcp-border); align-items: start; }
+.cmcp-card > .cmcp-srow:first-child { border-top: 0; }
+.wrap.cmcp .cmcp-srow h3 { margin: 0; font-size: 14px; font-weight: 600; display: flex; gap: 8px; align-items: center; }
+.cmcp-desc { margin: 3px 0 0; color: var(--cmcp-muted); }
+.cmcp-desc code, .cmcp-nested code { font-size: 12.5px; background: #efefeb; border-radius: 4px; padding: 1px 5px; }
+.cmcp-desc--danger { color: #7d1a14; }
+.cmcp-ctl { display: flex; align-items: center; gap: 8px; padding-top: 2px; }
+.cmcp-unit { color: var(--cmcp-muted); font-size: 13px; }
+.wrap.cmcp .cmcp-num-in { width: 80px; text-align: end; }
+/* Phones: a number row stacks its label above the field, or long labels shrink to a few letters. */
+@media (max-width: 600px) {
+	.cmcp-srow--num { grid-template-columns: minmax(0, 1fr); }
+	.cmcp-srow--num .cmcp-ctl { flex-wrap: wrap; }
+}
+.cmcp-nested { grid-column: 1 / -1; padding: 12px 14px; border: 1px solid var(--cmcp-border); border-radius: var(--cmcp-radius-sm); background: var(--cmcp-surface-2); }
+.wrap.cmcp .cmcp-nested label { font-size: 13px; font-weight: 600; display: block; margin-bottom: 6px; }
+.wrap.cmcp input.cmcp-switch { appearance: none; -webkit-appearance: none; width: 38px; height: 22px; border-radius: 999px; background: #8a908b; border: 0; position: relative; cursor: pointer; flex: none; margin: 0; transition: background .15s; box-shadow: none; }
+.wrap.cmcp input.cmcp-switch::before { content: ""; position: absolute; top: 3px; inset-inline-start: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .15s; margin: 0; }
+.wrap.cmcp input.cmcp-switch:checked { background: #1f9d4c; }
+.wrap.cmcp input.cmcp-switch:checked::before { transform: translateX(16px); content: ""; }
+.rtl .wrap.cmcp input.cmcp-switch:checked::before { transform: translateX(-16px); }
+.cmcp-state { order: -1; font-size: 13px; color: var(--cmcp-muted); min-width: 24px; text-align: end; }
+.cmcp-switch + .cmcp-state::before { content: attr(data-off); }
+.cmcp-switch:checked + .cmcp-state::before { content: attr(data-on); }
+.cmcp-danger-zone { border: 1px solid var(--cmcp-danger-border); border-radius: var(--cmcp-radius); background: #fff; margin-bottom: 20px; scroll-margin-top: 48px; }
+.cmcp-dz-h { padding: 14px 18px; border-bottom: 1px solid var(--cmcp-danger-border); background: var(--cmcp-danger-bg); border-radius: var(--cmcp-radius) var(--cmcp-radius) 0 0; display: flex; align-items: center; gap: 10px; }
+.wrap.cmcp .cmcp-dz-h h2 { margin: 0; padding: 0; font-size: 15px; color: #7d1a14; }
+.cmcp-dz-h svg { width: 18px; height: 18px; color: var(--cmcp-danger); }
+.cmcp-danger-zone .cmcp-srow { border-top: 0; }
+.cmcp-lists { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 12px; }
+.cmcp-lists--3 { grid-template-columns: 1fr 1fr 1fr; }
+@media (max-width: 1100px) { .cmcp-lists--3 { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 782px) { .cmcp-lists, .cmcp-lists--3 { grid-template-columns: 1fr; } }
+.cmcp-lh { margin: 0; font-size: 12px; font-weight: 600; }
+.cmcp-lh--danger { color: var(--cmcp-danger); }
+.cmcp-lh--keep { color: var(--cmcp-ok); }
+.cmcp-lh--gain { color: var(--cmcp-ink); }
+.cmcp-lifts { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; font-size: 13.5px; }
+.cmcp-lifts li { display: flex; gap: 8px; align-items: baseline; margin: 0; }
+.cmcp-lifts li::before { content: ""; width: 6px; height: 6px; border-radius: 1px; background: var(--cmcp-danger); flex: none; transform: translateY(-1px); }
+.cmcp-lifts--keep li::before { background: var(--cmcp-live); }
+.cmcp-lifts--gain li::before { background: var(--cmcp-ink); }
+/* In flow when clean; floats (sticky) only while there is something to save. */
+.cmcp-savebar { position: static; bottom: 12px; margin-top: 8px; display: flex; align-items: center; gap: 10px; padding: 12px 18px; background: #fff; border: 1px solid var(--cmcp-border-strong); border-radius: var(--cmcp-radius); box-shadow: 0 6px 24px rgba(0,0,0,.10); }
+.cmcp-savebar-msg { flex: 1; font-size: 13.5px; color: var(--cmcp-muted); }
+.cmcp-savebar.is-dirty { position: sticky; }
+.cmcp-savebar.is-dirty .cmcp-savebar-msg { color: var(--cmcp-text); font-weight: 600; }
+.wrap.cmcp [id^="cmcp-"] { scroll-margin-top: 48px; }
+
+/* ── About ── */
+.cmcp-about { max-width: 880px; }
+.cmcp-about-lead { font-size: 15px; margin: 0 0 20px; max-width: 75ch; }
+.cmcp-links { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 782px) { .cmcp-links { grid-template-columns: 1fr; } }
+.wrap.cmcp .cmcp-lcard { display: block; text-decoration: none; padding: 16px 18px; margin: 0; color: var(--cmcp-text); }
+.wrap.cmcp .cmcp-lcard:hover { border-color: var(--cmcp-border-strong); background: #fdfdfc; }
+.cmcp-lcard b { font-size: 15px; display: flex; align-items: center; gap: 6px; }
+.cmcp-lcard b svg { width: 14px; height: 14px; color: var(--cmcp-muted); }
+.cmcp-lcard p { margin: 4px 0 0; color: var(--cmcp-muted); }
+
+/* Phones: tighter header gutters and tabs; tabs wrap to a second line rather than hide off-screen (long locales). */
+@media (max-width: 600px) {
+	.cmcp-head { padding-inline: 16px; }
+	.cmcp-body { padding-inline: 16px; }
+	.wrap.cmcp > div:not(.cmcp-head):not(.cmcp-body):not(.cmcp-offbar) { margin-inline: 16px; }
+	.cmcp-tabs { gap: 0; flex-wrap: wrap; }
+	.cmcp-tab { padding-inline: 8px; font-size: 13.5px; }
+	.cmcp-tab[aria-current="page"]::after { left: 8px; right: 8px; }
+}
+.wrap.cmcp .cmcp-copy-note { margin: 8px 0; color: var(--cmcp-ok); font-weight: 600; }
+.wrap.cmcp .cmcp-connect-status { display: flex; gap: 12px; align-items: center; padding: 10px 14px; border-radius: var(--cmcp-radius-sm); border: 1px solid var(--cmcp-border); background: var(--cmcp-surface); margin: 0 0 16px; font-size: 13px; }
+.wrap.cmcp .cmcp-connect-status--connected { border-color: var(--cmcp-ok-border); background: var(--cmcp-ok-bg, #edfaef); color: var(--cmcp-ok); }
+.wrap.cmcp .cmcp-connect-status--blocked { border-color: var(--cmcp-warn-border); background: var(--cmcp-warn-bg); }
+.wrap.cmcp .cmcp-connect-status--registered, .wrap.cmcp .cmcp-connect-status--approved { border-color: var(--cmcp-accent, #2271b1); background: var(--cmcp-info-bg); }
+/* "New connections open · mm:ss left · Turn off": shown on the strip only while the window is open. */
+.wrap.cmcp .cmcp-connect-status-window { margin-inline-start: auto; display: inline-flex; align-items: center; gap: 10px; color: var(--cmcp-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.wrap.cmcp .cmcp-connect-status-window form { display: inline; margin: 0; }
+.wrap.cmcp .cmcp-connect-status-window .cmcp-linkbtn { font-size: 13px; }

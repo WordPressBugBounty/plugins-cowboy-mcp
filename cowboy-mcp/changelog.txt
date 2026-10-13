@@ -1,0 +1,172 @@
+== Changelog ==
+
+Full version history for Cowboy MCP. The readme.txt lists the most recent
+release; older entries are kept here.
+
+= 1.7.3 =
+* New: connect Perplexity, Grok and the Gemini app from the Connections tab. One click copies your site link and opens the app, and the page confirms when the app has signed in. There is also an n8n panel with the MCP Client Tool fields ready to copy.
+* New: `wp_search_replace` takes an optional `post_id` to limit a replacement to one post or page (contributed by dandry, PR #4).
+* Fix: ChatGPT connects again. 1.7.2 refused ChatGPT's new sign-in identity with "the app's identity document on chatgpt.com is invalid".
+* Fix: restoring a database checkpoint no longer runs out of memory on larger sites.
+* Fix: the Wordfence tools work again on current Wordfence installs, and the activity report shows readable IP addresses.
+* Fix: the WooCommerce customer report lists top spenders.
+* Fix: an agent can no longer deactivate Cowboy MCP and cut off its own connection.
+* Improved: "Last used" on the Connections tab stays accurate after an app's sign-in expires, and reconnecting an app you removed points you to the New connections switch.
+* Security: `wp_cli` refuses commands that would print passwords, salts or keys and redacts them from its output; agents can no longer delete Cowboy MCP's own transients.
+* Fixes: MCP protocol conformance (`completions` capability, JSON-RPC errors for malformed requests), PHP warnings when an agent creates a comment without an author name, and the access-level selector on phones.
+
+= 1.7.2 =
+* New: Claude Code, Codex, Gemini CLI, Opencode, Cursor and VS Code now connect with a one-click sign-in - no API key to copy. Keys still work for scripts and CI.
+* UI updates: Add to Cursor and Install in VS Code buttons, one copy-and-run command per setup panel (config files are the fallback), a shorter Connections tab that confirms live when an app connects, "Desktop Connector" renamed to "Browser sign-in", and Select all / Deselect all for Custom access.
+* New: Claude Code and Codex connect without the New connections switch.
+* New: Power mode indicator in the page header.
+* Fixes: Cursor sign-in, server addresses with a trailing slash, Connection Doctor warnings on local sites.
+* Security: the plugin's own transients are protected from the option tools and WP-CLI.
+
+= 1.7.1 =
+* Fix: resolved a bug where restoring a checkpoint could alter values containing % signs (permalinks, page-builder data). Restores now keep every value exactly as saved and are verified against the checkpoint before they replace your data.
+* Fix: media uploads are now fully self-sufficient, with no dependency on other plugins or WordPress admin files.
+* New: Cowboy MCP checks values restored by earlier versions and offers a one-click repair where needed (checkpointed and undoable).
+* New: the Connections tab shows when an app such as ChatGPT tries to connect while new connections are off, with the switch right there.
+* New: Add to Claude turns the connector on in the same click, a new Open ChatGPT button copies your link and opens ChatGPT, and the page confirms live when the app is connected.
+
+= 1.7.0 =
+* New: a redesigned, simpler settings page that also works on phones.
+* New: an Add to Claude button - connect claude.ai or Claude Desktop in one click (public HTTPS sites).
+* New: Beaver Builder support - read and edit page layouts, modules and settings, with undo.
+* New: SiteOrigin Page Builder support - read and edit layouts, widgets and settings, with undo (needs Page Builder 2.36.0+).
+* Improved: Connection Doctor results are shown in your language.
+* Fix: undo no longer strips backslashes from page-builder data.
+* Fix: no more PHP deprecation notice on the connection approval page.
+
+= 1.6.9 =
+* New: Revisions - list a post's revisions, see a git-style diff, restore one (undoable).
+* New: The Events Calendar - events, venues and organizers; recurring events with Events Calendar Pro (whole-series edits, cancel/restore single dates). Changes are undoable; permanent deletes take a database checkpoint first.
+* New: SEO tools now also work with All in One SEO and SEOPress (and report when several SEO plugins are active).
+
+= 1.6.8 =
+* Fix: OAuth connectors (Claude, ChatGPT) recover after a staging sync or backup restore. Previously the AI app kept a registration the site no longer knew and landed on an "Unknown OAuth client" page; the only way out was removing and re-adding the connector. Recovery is now Reconnect and Approve.
+* Fix: connections made before 1.6.8 recover the same way. Existing connections and tokens are untouched.
+* New: a "New connections" button at the top of the Claude and ChatGPT panels on the Connection tab. Adding an app to the site needs it enabled; it switches itself off after 30 minutes. Existing connections never need it.
+* Improved: the OAuth consent and error pages say what will happen and what to do next.
+* Security: hardening of the OAuth connector's registration and consent flow. Working connections are unaffected. Apps that send you back to a host other than the known AI apps or localhost, such as a self-hosted n8n, can be allowed under Settings > Cowboy MCP > Desktop Connector.
+
+= 1.6.7 =
+* Fix: WooCommerce product reviews are listed again. WooCommerce hides reviews from any comment query that does not ask for them explicitly, so wp_list_comments returned none and agents reported that a store had no reviews at all. Reviews now appear alongside comments, each with its star rating and verified-owner flag, and ordinary comments left on a product come back with them.
+* New: wp_list_comments takes a type parameter - "comment", "review", "pingback", "trackback", "pings", "all", or a custom comment type - to narrow a listing to one kind.
+
+= 1.6.6 =
+* Fix: connecting over OAuth while logged out of wp-admin works again. The login round-trip was stripping the percent-encoding from the authorization request, which corrupted redirect_uri and resource so the connection could not resume after signing in. Thanks to @lukaszliniewicz for the report and the fix.
+* Fix: the per-IP request limit that guards the endpoint against credential stuffing now counts only failed authentication attempts. Busy sessions behind one IP (cloud connectors, parallel tool calls) were being refused with 429 before their own per-key limit applied.
+* Fix: scheduled publishing works. wp_create_post and wp_update_post accept a date ("YYYY-MM-DD HH:MM:SS" in the site timezone, or ISO 8601 with an offset), and wp_update_post accepts status "future".
+* Fix: wp_db_health_report counted autoloaded options using only the pre-6.6 "yes" value and undercounted on current WordPress.
+* Fix: the Activity tab and audit log now record whether each tool call succeeded, failed, or threw.
+* Change: the cache tools are always available. Without WP Rocket, LiteSpeed Cache, or W3 Total Cache, wp_cache_flush clears the WordPress object cache and expired transients instead of the tool being absent.
+
+= 1.6.5 =
+* Security: writes into mu-plugins/ now require Power mode. Must-use plugins load on every request and cannot be paused by recovery mode, so one broken file there takes down the site and the undo journal with it. Agents are pointed to a regular plugin plus wp_activate_plugin instead.
+* Fix: PHP files are syntax-checked before they are written; a truncated or malformed file is rejected with the line number and nothing lands on disk. Dry runs report the same refusals.
+* Fix: a short write (disk full, quota) fails cleanly instead of renaming a truncated file into place.
+
+= 1.6.4 =
+* New: WordPress Abilities API bridge (WordPress 6.9+). Cowboy's tools become cowboy-mcp/* abilities for WP-CLI, the REST API, the MCP Adapter and WordPress AI tooling - with safe mode, dry run, audit log and undo still applied - and abilities from other plugins appear as Cowboy tools. Two switches under Settings, on by default.
+* New: Connection Doctor reports the bridge state.
+* New: a welcome notice after activation and a one-time feedback prompt (review or support).
+* Fix: custom key scopes accept Abilities API names; wp_update_option and wp_list_changes declare their value types.
+
+= 1.6.3 =
+* New: local development, first-class - Cowboy MCP now works just as well on a local site (Local, Studio, MAMP, DevKinsta, and any localhost setup) as on a live one. No public URL or tunnel needed: Claude Code, Cursor, Codex, and Gemini CLI connect with an API key exactly as they do in production, and Claude Desktop connects through a small local bridge.
+* New: the Connection tab recognises local sites and shows, per client, what works locally and what needs a public URL - with a ready-to-copy Claude Desktop config that bridges through mcp-remote (read-only key by default).
+* New: Connection Doctor understands local sites - plain HTTP on a local site passes with local context, and the public-hostname check becomes a warning with fix steps for both local and public setups instead of a failure.
+* New: self-signed certificate help - on loopback hosts the connection snippets offer a plain-http variant, with a clear warning against disabling TLS verification.
+* Compatibility: tested with WordPress 7.1.
+
+= 1.6.2 =
+* New: Gutenberg block editing - read any post as a block tree and apply surgical batch edits (update, insert, delete, move, replace) without resending full content.
+* New: block pattern tools - list registered and user patterns, create, update, and delete user patterns (synced or unsynced).
+* New: site editor tools - list, read, save, and reset block theme templates and template parts; editing a theme template creates an override you can undo back to the theme's version.
+* New: global styles tools - read and update theme.json user customizations (colors, typography, spacing); navigation listing for block themes.
+* New: all Gutenberg writes are undoable from the Activity tab, with the same raw-HTML safety gate as the Elementor tools.
+* New: per-credential tool scoping - limit any API key or OAuth connection to read-only access or a custom list of tools; existing credentials keep full access until you change them.
+* Security: a credential can never widen its own scope - scope settings are write-protected from the API, even in Power mode.
+* Security: hardened the WP-CLI safety blocklist against shell-quoting and flag-injection bypasses - commands are now tokenized the way the shell parses them before matching.
+* Security: SQL run through WP-CLI is now scanned with MySQL versioned comments unwrapped, and commands that cannot be safely parsed are rejected.
+
+= 1.6.1 =
+* New: user management - list, read, create, update, and delete users, including role changes.
+* New: navigation menus - create, rename, assign theme locations, and set menu items as a nested tree.
+* New: media library - list attachments with a filter for images missing alt text, edit titles, captions, and alt text, and delete attachments.
+* New: deleted media is recoverable - an attachment's files are moved aside instead of destroyed, so the deletion can be undone from the Activity tab, and featured-image and site-logo links are restored with it.
+* New: SEO meta management for Yoast SEO and Rank Math - read and update a post's SEO title, meta description, focus keyword, noindex/nofollow, canonical URL, and Facebook/X social overrides through one unified toolset, with template variables like %%category%% preserved.
+* New: SEO audit - scan posts and pages for missing or badly sized meta descriptions, missing focus keywords, over-long titles, and published posts still set to noindex.
+* New: SEO meta changes are undoable like everything else, and Yoast's indexable cache refreshes automatically so edits show up on the site immediately.
+* Security: granting an administrator-level role, setting a password, or changing a privileged user's email now requires Power mode.
+* Security: you can never change your own role, password, or email through the API, and the last administrator can be neither deleted nor demoted.
+
+= 1.6.0 =
+* New: install plugins and themes straight from WordPress.org (wp_install_plugin / wp_install_theme) - pure PHP, no WP-CLI or shell access needed
+* New: update plugins and themes (wp_update_plugin / wp_update_theme), one at a time or all at once - with automatic file backup, database checkpoint, and a post-update health check that restores the old version automatically if the site breaks
+* New: delete plugins and themes (wp_delete_plugin / wp_delete_theme) with a backup kept for undo
+* New: wp_list_plugins and wp_list_themes now report available updates (update_available / new_version, optional refresh_updates)
+* New: every install, update, and delete is journaled - wp_undo_change rolls a plugin or theme back to the exact previous version
+* New: "Auto-checkpoint before plugin & theme updates" setting (on by default)
+* Fixed: PHP 8.0/8.1 compatibility - corrected return-type syntax (true|WP_Error) that caused a fatal error on PHP older than 8.2
+
+= 1.5.3 =
+* New: Connection Doctor - a one-click self-test on the Connection tab that checks HTTPS, public reachability, REST availability, and OAuth discovery, names the likely blocker (Cloudflare, ModSecurity, Basic Auth, cache plugins), and gives you a copy-pasteable report. Also available as the wp_connection_doctor MCP tool and the `wp cowboy-mcp doctor` WP-CLI command.
+
+= 1.5.2 =
+* New: bundled translations for the admin settings page and the OAuth consent screen in ten more locales - Simplified Chinese (zh_CN), Japanese (ja), Korean (ko_KR), German (de_DE), Spanish (es_ES), French (fr_FR), Italian (it_IT), Portuguese - Brazil (pt_BR), Hindi (hi_IN), and Indonesian (id_ID).
+
+= 1.5.1 =
+* New: Russian (ru_RU) and Ukrainian (uk) translations for the admin settings page and the OAuth consent screen.
+* The plugin now registers a Domain Path and loads its text domain on init, so bundled translations apply on WordPress 6.2+.
+
+= 1.5.0 =
+* New: Activity tab - a per-change undo journal. Every change an AI agent makes (posts, options, terms, comments, files, users, media, plugins/themes, WooCommerce, ACF, Wordfence) is recorded, and you can roll any of them back individually from wp-admin. Conflict detection warns you if something else changed in the meantime.
+* New: database checkpoints - take a one-click snapshot of your database and restore the whole site to it later. A checkpoint is also taken automatically before mutating WP-CLI commands.
+* New: batch undo - reverse every change made by a single batched request together.
+* New: six rollback tools for agents (list changes, undo a change, and create/list/restore/delete checkpoints), plus settings to tune undo-history retention and how many checkpoints to keep.
+* Your MCP API keys and the plugin's own settings are never touched by undo or checkpoint restore.
+
+= 1.4.1 =
+* New: redesigned connection page - pick your app (claude.ai, Claude Desktop, ChatGPT, Claude Code, Codex, Opencode, Cursor, Gemini CLI) from a sidebar and follow steps tailored to it.
+* New: connect from ChatGPT - custom connectors (Developer mode) work with the built-in one-click sign-in.
+* Fixed: OAuth setup steps now appear immediately after enabling the Desktop Connector.
+* Fixed: the connection-page preference is now cleaned up on uninstall.
+
+= 1.4.0 =
+* New: one-click sign-in for the Claude desktop and web apps - no terminal required.
+* Updated for WordPress.org plugin directory compliance.
+* Changed: database tools now use fixed, safe queries - no free-form SQL.
+* Removed: the self-hosted auto-updater; updates now come through WordPress.org.
+
+= 1.3.0 =
+* Feature: self-hosted one-click updates. The plugin checks cowboymcp.com for new versions and offers updates through the normal WordPress Plugins screen, including the per-plugin auto-update toggle (owner opt-in). Updates are delivered from GitHub release assets over HTTPS. Fails closed - any check error simply shows no update.
+
+= 1.2.0 =
+* Feature: optional **Power mode** (admin opt-in, off by default) - lifts curated safety restrictions for trusted power users: `wp_cli` `eval`/`shell` and other blocked commands, dangerous SQL (DDL), writing files outside `wp-content/`, and SSRF protection on outbound requests. The plugin's own API keys and settings, credential redaction, and self-delete protection remain enforced; `safe_mode` confirmation gating is unaffected.
+
+= 1.1.0 =
+* Security: lock down `wp_db_query` - apply the write blocklist (incl. INTO OUTFILE/DUMPFILE) to the read path, reject comment-obfuscated and credential-targeting queries, and redact secret columns
+* Security: block reads of sensitive options via resource templates, completions, and WooCommerce settings; block writes to payment-gateway/secret/role option groups
+* Security: harden SSRF protection - resolve all A/AAAA records, normalize IPv4-mapped IPv6, deny loopback/link-local/ULA, and use the safe HTTP transport so redirects are re-validated
+* Security: API-key validation no longer uses the secret-derived prefix as a fast path (timing side-channel); add a per-IP request throttle applied to all requests
+* Security: block `--require`/loader global flags and whitespace-obfuscated commands in `wp_cli`; normalize the SQL write blocklist against inline comments
+* Security: refuse executable file writes into the uploads directory; harden wp-content path confinement (null bytes, symlinked parents, sibling-prefix)
+* Security: prevent deleting the last administrator and validate `reassign_to` in `wp_delete_user`
+* Security: expand audit-log redaction, scrub secrets from error-log/transient output, relativize hook file paths, and add Origin validation
+* Hardening: apply the tool allowlist before dry-run/safe-mode, and guard against nested batch execution
+
+= 1.0.2 =
+* Prefix all admin identifiers with `cowboy_mcp_` to avoid namespace collisions
+* Change REST namespace from `mcp/v1` to `cowboy-mcp/v1`
+* Sanitize `$_SERVER['REMOTE_ADDR']` with `sanitize_text_field()`
+* Add capability checks to plugin activation/deactivation and theme switching
+
+= 1.0.1 =
+* Rename plugin integration files to avoid false-positive library detection
+* Update author metadata
+
+= 1.0.0 =
+* Initial release

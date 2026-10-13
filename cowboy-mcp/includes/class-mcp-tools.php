@@ -1,0 +1,1335 @@
+<?php
+/**
+ * Cowboy MCP – Tools (Orchestrator)
+ *
+ * Slim registry that lazily loads domain-specific tool files from includes/tools/.
+ * Preserves the public API used by transport, admin, and resources classes.
+ */
+
+defined( 'ABSPATH' ) || exit;
+
+class Cowboy_MCP_Tools {
+
+    /** Tool name prefixes, ordered from most-specific to least-specific. */
+    private const TOOL_PREFIXES = [
+        'wp_woo_', 'wp_acf_', 'wp_seo_',
+        'wp_forms_', 'wp_cache_', 'wp_elementor_', 'wp_beaver_', 'wp_siteorigin_', 'wp_wordfence_', 'wp_events_', 'cowboy_mcp_', 'wp_',
+    ];
+
+    /** Domain files to load from includes/tools/. */
+    private const DOMAIN_FILES = [
+        'core/options.php',
+        'core/files.php',
+        'core/database.php',
+        'core/system.php',
+        'core/site-health.php',
+        'core/users.php',
+        'core/media.php',
+        'core/batch.php',
+        'core/rollback.php',
+        'core/diagnostics.php',
+        'core/posts.php',
+        'core/revisions.php',
+        'core/plugins.php',
+        'core/themes.php',
+        'core/taxonomies.php',
+        'core/comments.php',
+        'core/menus.php',
+        'gutenberg/tools-gutenberg.php',
+        'acf/tools-acf.php',
+        'woocommerce/products.php',
+        'woocommerce/orders.php',
+        'woocommerce/customers.php',
+        'woocommerce/coupons.php',
+        'woocommerce/settings.php',
+        'woocommerce/reports.php',
+        'seo/tools-seo.php',
+        'forms/tools-forms.php',
+        'cache/tools-cache.php',
+        'elementor/tools-elementor.php',
+        'beaver-builder/tools-beaver-builder.php',
+        'siteorigin/tools-siteorigin.php',
+        'wordfence/tools-wordfence.php',
+        'events/tools-events.php',
+    ];
+
+    /**
+     * Domain files whose availability depends on another plugin/theme feature.
+     * Their guard lives in domain_available() — the same booleans feed the
+     * Abilities-bridge index signature, so the cache is keyed on exactly the
+     * conditions that decide which tools exist (not on active_plugins, which
+     * misses mu-plugins, theme-bundled libraries and --skip-plugins).
+     */
+    private const CONDITIONAL_DOMAIN_FILES = [
+        'acf/tools-acf.php',
+        'woocommerce/products.php',
+        'woocommerce/orders.php',
+        'woocommerce/customers.php',
+        'woocommerce/coupons.php',
+        'woocommerce/settings.php',
+        'woocommerce/reports.php',
+        'seo/tools-seo.php',
+        'forms/tools-forms.php',
+        'elementor/tools-elementor.php',
+        'beaver-builder/tools-beaver-builder.php',
+        'siteorigin/tools-siteorigin.php',
+        'wordfence/tools-wordfence.php',
+        'events/tools-events.php',
+    ];
+
+    /** Map from domain file path to category name. */
+    private const CATEGORY_MAP = [
+        'core/options.php'            => 'options',
+        'core/files.php'              => 'files',
+        'core/database.php'           => 'database',
+        'core/system.php'             => 'system',
+        'core/site-health.php'        => 'system',
+        'core/users.php'              => 'users',
+        'core/media.php'              => 'media',
+        'core/batch.php'              => 'batch',
+        'core/rollback.php'           => 'rollback',
+        'core/diagnostics.php'        => 'diagnostics',
+        'core/posts.php'              => 'content',
+        'core/revisions.php'          => 'content',
+        'core/plugins.php'            => 'plugins',
+        'core/themes.php'             => 'themes',
+        'core/taxonomies.php'         => 'taxonomies',
+        'core/comments.php'           => 'comments',
+        'core/menus.php'              => 'menus',
+        'gutenberg/tools-gutenberg.php' => 'gutenberg',
+        'acf/tools-acf.php'                 => 'acf',
+        'woocommerce/products.php'          => 'woocommerce',
+        'woocommerce/orders.php'            => 'woocommerce',
+        'woocommerce/customers.php'         => 'woocommerce',
+        'woocommerce/coupons.php'           => 'woocommerce',
+        'woocommerce/settings.php'          => 'woocommerce',
+        'woocommerce/reports.php'           => 'woocommerce',
+        'seo/tools-seo.php'                 => 'seo',
+        'forms/tools-forms.php'             => 'forms',
+        'cache/tools-cache.php'             => 'cache',
+        'elementor/tools-elementor.php'     => 'elementor',
+        'beaver-builder/tools-beaver-builder.php' => 'beaver-builder',
+        'siteorigin/tools-siteorigin.php'     => 'siteorigin',
+        'wordfence/tools-wordfence.php'     => 'wordfence',
+        'events/tools-events.php'           => 'events',
+        'abilities/tools-abilities.php'     => 'abilities',   // loaded in phase 2, not in DOMAIN_FILES
+    ];
+
+    /** Human-readable category descriptions for gateway instructions. */
+    private const CATEGORY_DESCRIPTIONS = [
+        'options'        => 'update WordPress options (with sensitive-option blocklist)',
+        'files'          => 'read, write, list, delete files in wp-content',
+        'database'       => 'raw SQL queries and writes (with safety blocklists)',
+        'system'         => 'site info, WP-CLI, search-replace, site health',
+        'users'          => 'list, read, create, update, and delete users, including role changes (with self-protection and privileged-role gating)',
+        'media'          => 'list, upload, update, and delete media library attachments, including alt text',
+        'batch'          => 'multi-tool sequencing, audit log retrieval',
+        'rollback'       => 'undo changes from the journal, create/list/restore/delete database checkpoints',
+        'diagnostics'    => 'error logs, HTTP requests, email testing, hooks, transients, REST routes, thumbnails, rewrite rules, site snapshots, connection self-test',
+        'content'        => 'create, read, update, delete posts, pages, and custom post types',
+        'plugins'        => 'list, activate, and deactivate plugins',
+        'themes'         => 'list themes and switch the active theme',
+        'taxonomies'     => 'list, create, update, and delete taxonomy terms',
+        'comments'       => 'list, create, update, and delete comments and product reviews',
+        'menus'          => 'list, create, update, and delete classic navigation menus and their items',
+        'gutenberg'      => 'block editing, patterns, FSE templates, template parts, global styles, navigation',
+        'acf'            => 'ACF field groups, field CRUD, repeater operations',
+        'woocommerce'    => 'products, orders, customers, coupons, settings, reports',
+        'seo'            => 'SEO meta read/write + audit',
+        'forms'          => 'form provider detection',
+        'cache'          => 'provider detect, flush, preload, settings',
+        'elementor'      => 'templates, page content, global styles, widgets',
+        'beaver-builder' => 'Beaver Builder page layouts (read, replace with undo), module catalog and settings schemas, site-wide builder settings',
+        'siteorigin'     => 'SiteOrigin Page Builder layouts (read, replace, addressed row/widget edits, prebuilt layouts — all undoable), widget catalog and schemas, style fields, builder settings, Widgets Bundle activation',
+        'wordfence'      => 'scan, blocks, firewall, live traffic, activity, settings',
+        'events'         => 'The Events Calendar: events, venues, organizers; recurring series and occurrences with Events Calendar Pro',
+        'abilities'      => 'abilities registered by other plugins through the WordPress Abilities API (WooCommerce, the AI plugin\'s core abilities, core...) - each runs its own permission check; not undoable',
+    ];
+
+    /** @var array<array> Cached tool definitions. */
+    private static array $tools = [];
+
+    /** @var array<string, array> Tool definitions indexed by name for O(1) lookup. */
+    private static array $tool_map = [];
+
+    /** @var array<string, callable> Cached handler map. */
+    private static array $handlers = [];
+
+    /** @var array<string, string> Tool name → category mapping. */
+    private static array $tool_categories = [];
+
+    /** @var bool Whether domain files have been loaded. */
+    private static bool $loaded = false;
+
+    /** @var bool Whether the inbound `abilities` domain has been loaded (or deliberately skipped). */
+    private static bool $abilities_loaded = false;
+
+    /** @var bool Re-entrancy guard while the abilities domain file is being required. */
+    private static bool $abilities_loading = false;
+
+    /** @var array|null Cached settings to avoid repeated get_option() calls. */
+    private static ?array $settings_cache = null;
+
+    /**
+     * Get plugin settings, cached for the duration of the request.
+     */
+    public static function get_settings(): array {
+        if ( self::$settings_cache === null ) {
+            self::$settings_cache = get_option( 'cowboy_mcp_settings', [] );
+        }
+        return self::$settings_cache;
+    }
+
+    /**
+     * Write a structured JSON log line when log_requests is enabled.
+     * Delegates to Cowboy_MCP_Auth::log() with key context merged in.
+     */
+    private static function mcp_log( string $event, array $context = [] ): ?int {
+        return Cowboy_MCP_Auth::log( $event, array_merge( Cowboy_MCP_Auth::$current_key_context, $context ) );
+    }
+
+    /** Audit result_status for a call_tool() return value: success, or error for WP_Error / isError results. */
+    private static function result_status( $result ): string {
+        if ( is_wp_error( $result ) || ( is_array( $result ) && ! empty( $result['isError'] ) ) ) {
+            return 'error';
+        }
+        return 'success';
+    }
+
+    /* ================================================================
+     *  PUBLIC API (unchanged signatures)
+     * ================================================================ */
+
+    /**
+     * Return the tool list for tools/list.
+     */
+    public static function list_tools( array $params ): array {
+        return [ 'tools' => self::gateway_tool_definitions() ];
+    }
+
+    /**
+     * Dispatch a tools/call request.
+     */
+    public static function call_tool( array $params ): array|WP_Error {
+        self::load_domains();
+
+        $name = $params['name'] ?? '';
+        $args = $params['arguments'] ?? [];
+
+        /**
+         * Filter whether a specific tool is allowed to execute.
+         *
+         * @param bool   $allowed Whether the tool is allowed.
+         * @param string $name    Tool name.
+         * @param array  $args    Tool arguments.
+         */
+        if ( ! apply_filters( 'cowboy_mcp_tool_allowed', true, $name, $args ) ) {
+            return new WP_Error( 'tool_blocked', "Tool blocked by filter: {$name}", [ 'code' => -32603 ] );
+        }
+
+        // Gateway meta-tool: cowboy_run delegates to the inner tool.
+        if ( $name === 'cowboy_run' ) {
+            $inner_tool = $args['tool'] ?? '';
+            if ( empty( $inner_tool ) ) {
+                return new WP_Error( 'invalid_params', 'Missing required argument: tool', [ 'code' => -32602 ] );
+            }
+            if ( $inner_tool === 'cowboy_run' || $inner_tool === 'cowboy_discover' ) {
+                return new WP_Error( 'invalid_params', 'Cannot invoke gateway meta-tools through cowboy_run.', [ 'code' => -32602 ] );
+            }
+            $log_id = self::mcp_log( 'tool_call', [ 'tool' => 'cowboy_run', 'inner_tool' => $inner_tool ] );
+            $result = self::call_tool( [
+                'name'      => $inner_tool,
+                'arguments' => $args['arguments'] ?? [],
+            ] );
+            Cowboy_MCP_Audit_Log::set_result( $log_id, self::result_status( $result ) );
+            return $result;
+        }
+
+        // Gateway meta-tool: cowboy_discover searches/browses tools.
+        if ( $name === 'cowboy_discover' ) {
+            $log_id = self::mcp_log( 'tool_call', [ 'tool' => 'cowboy_discover', 'args' => $args ] );
+            $result = self::handle_discover_tools( $args );
+            if ( is_wp_error( $result ) ) {
+                self::mcp_log( 'tool_error', [ 'tool' => 'cowboy_discover', 'error' => $result->get_error_message() ] );
+                Cowboy_MCP_Audit_Log::set_result( $log_id, 'error' );
+                return $result;
+            }
+            Cowboy_MCP_Audit_Log::set_result( $log_id, 'success' );
+            $text = wp_json_encode( $result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES );
+            return [ 'content' => [[ 'type' => 'text', 'text' => $text ]] ];
+        }
+
+        // Allowlist gate — the outer boundary for concrete tools, applied BEFORE
+        // dry-run/safe-mode so a disabled tool returns "disabled" rather than leaking a
+        // preview. Meta-tools (cowboy_run/cowboy_discover) are handled above; an inner
+        // tool invoked through cowboy_run is re-checked when call_tool() recurses.
+        $settings = self::get_settings();
+        $allowed  = $settings['allowed_tools'] ?? 'all';
+        if ( $allowed !== 'all' && is_array( $allowed ) && ! in_array( $name, $allowed, true ) ) {
+            return new WP_Error( 'tool_disabled', "Tool is disabled: {$name}", [ 'code' => -32603 ] );
+        }
+
+        // Abilities-transport policy: while a cowboy-mcp/* ability is executing
+        // (REST run, WP-CLI, an MCP adapter), nested dispatch through batch or
+        // cowboy_run may not reach tools the outbound policy withholds (wp_cli /
+        // wp_write_file without Power mode, tools outside allowed_tools, inbound
+        // wrappers). Registration and the permission callback only see the outer name.
+        if ( class_exists( 'Cowboy_MCP_Abilities' ) && Cowboy_MCP_Abilities::transport_active() && ! Cowboy_MCP_Abilities::is_exposable( $name ) ) {
+            return new WP_Error( 'ability_policy_denied', "{$name} is not available through the Abilities API on this site.", [ 'code' => -32603 ] );
+        }
+
+        $handler = self::$handlers[ $name ] ?? null;
+        if ( ! $handler ) {
+            // Self-correcting: point the agent at the nearest real tool names so it can
+            // retry cowboy_run without a separate cowboy_discover round-trip.
+            $suggestions = self::closest_tool_names( $name, Cowboy_MCP_Security::filter_tools_to_scope( self::get_tool_definitions() ), 5 );
+            $names       = implode( ', ', array_column( $suggestions, 'name' ) );
+            $hint        = $names !== '' ? " Did you mean: {$names}?" : '';
+            return new WP_Error(
+                'unknown_tool',
+                "Tool not found: {$name}.{$hint} Use cowboy_discover to search by keyword or category.",
+                [ 'code' => -32602 ]
+            );
+        }
+
+        // Per-credential scope gate — after handler lookup (unknown tools keep
+        // the self-correcting unknown_tool error) and before required-arg
+        // validation, the dry-run intercept, and safe mode, so an out-of-scope
+        // tool never leaks a preview. Scope can only be set by an admin in
+        // wp-admin: both scope stores are hard-protected options.
+        $scope_annotations = self::$tool_map[ $name ]['annotations'] ?? [];
+        if ( ! Cowboy_MCP_Security::tool_in_scope( $name, $scope_annotations ) ) {
+            $scope_mode = Cowboy_MCP_Security::current_scope()['mode'] ?? 'custom';
+            self::mcp_log( 'tool_scope_denied', [ 'tool' => $name, 'scope_mode' => $scope_mode ] );
+            $message = ( 'read_only' === $scope_mode )
+                ? "This credential is read-only; {$name} is not a read-only tool."
+                : "This credential's scope does not include {$name}.";
+            return new WP_Error(
+                'tool_scope_denied',
+                $message . ' Use cowboy_discover to see the tools this credential may call.',
+                [ 'code' => -32603 ]
+            );
+        }
+
+        // Validate required arguments against the tool's inputSchema.
+        $tool_def = self::$tool_map[ $name ] ?? null;
+        if ( $tool_def ) {
+            $required = $tool_def['inputSchema']['required'] ?? [];
+            $missing  = array_diff( $required, array_keys( $args ) );
+            if ( ! empty( $missing ) ) {
+                // Self-correcting: return the tool's inputSchema inline so the agent can
+                // supply the missing arguments without re-discovering the tool first.
+                $schema_json = wp_json_encode( $tool_def['inputSchema'], JSON_UNESCAPED_SLASHES );
+                return new WP_Error(
+                    'invalid_params',
+                    'Missing required argument(s): ' . implode( ', ', $missing )
+                        . '. Resend the call for "' . $name . '" including these arguments. inputSchema: ' . $schema_json,
+                    [ 'code' => -32602 ]
+                );
+            }
+        }
+
+        // The dry-run and safe-mode previews bypass the handler's validation.
+        if ( $name === 'wp_search_replace' && function_exists( 'cowboy_mcp_search_replace_normalize_args' ) ) {
+            $args = cowboy_mcp_search_replace_normalize_args( $args );
+            if ( is_wp_error( $args ) ) {
+                return $args;
+            }
+        }
+
+        // Dry-run intercept: preview what the tool would do without executing.
+        if ( ! empty( $args['dry_run'] ) ) {
+            $annotations = self::$tool_map[ $name ]['annotations'] ?? [];
+            if ( ! empty( $annotations['readOnlyHint'] ) ) {
+                return new WP_Error( 'invalid_params', 'dry_run is not applicable to read-only tools.' );
+            }
+            return self::generate_dry_run_preview( $name, $args );
+        }
+
+        // Safe mode: require confirmation for destructive operations.
+        if ( ! empty( $settings['safe_mode'] ) ) {
+            $annotations = self::$tool_map[ $name ]['annotations'] ?? [];
+            if ( ! empty( $annotations['destructiveHint'] ) && empty( $args['confirm'] ) ) {
+                $preview = self::generate_dry_run_preview( $name, $args );
+                $preview_text = $preview['content'][0]['text'] ?? '';
+                return [
+                    'content' => [
+                        [ 'type' => 'text', 'text' => wp_json_encode( [
+                            'confirmation_required' => true,
+                            'tool'                  => $name,
+                            'message'               => "Safe mode is ON. This tool is destructive and requires explicit confirmation. Resend with confirm: true to execute.",
+                            'preview'               => json_decode( $preview_text, true ),
+                        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) ],
+                    ],
+                    'isError' => true,
+                ];
+            }
+        }
+
+        // Queue MCP log notification if session has a log level.
+        if ( class_exists( 'Cowboy_MCP_Transport' ) && method_exists( 'Cowboy_MCP_Transport', 'queue_notification' ) ) {
+            Cowboy_MCP_Transport::queue_notification( 'info', "Executing tool: {$name}" );
+        }
+
+        $log_id = self::mcp_log( 'tool_call', [ 'tool' => $name, 'args' => $args, 'power_mode' => Cowboy_MCP_Security::power_mode_enabled() ] );
+
+        $capture = class_exists( 'Cowboy_MCP_Rollback' )
+            ? Cowboy_MCP_Rollback::begin( $name, $args, self::$tool_map[ $name ]['annotations'] ?? [] )
+            : null;
+
+        try {
+            $result = call_user_func( $handler, $args );
+            if ( is_wp_error( $result ) ) {
+                if ( $capture !== null ) {
+                    Cowboy_MCP_Rollback::discard( $capture );
+                }
+                self::mcp_log( 'tool_error', [ 'tool' => $name, 'error' => $result->get_error_message() ] );
+                Cowboy_MCP_Audit_Log::set_result( $log_id, 'error' );
+
+                // Enhanced error response with suggestions.
+                $suggestion = $result->get_error_data()['suggestion']
+                              ?? self::get_error_suggestion( $name, $result->get_error_code() );
+                $text = 'Error: ' . $result->get_error_message();
+                if ( $suggestion ) {
+                    $text .= "\nSuggestion: " . $suggestion;
+                }
+
+                if ( class_exists( 'Cowboy_MCP_Transport' ) && method_exists( 'Cowboy_MCP_Transport', 'queue_notification' ) ) {
+                    Cowboy_MCP_Transport::queue_notification( 'warning', "Tool error: {$result->get_error_message()}" );
+                }
+
+                return [
+                    'content' => [
+                        [ 'type' => 'text', 'text' => $text ],
+                    ],
+                    'isError' => true,
+                ];
+            }
+
+            if ( $capture !== null ) {
+                $change_id = Cowboy_MCP_Rollback::commit( $capture, $result );
+                if ( $change_id !== null && is_array( $result ) ) {
+                    $result['change_id'] = $change_id;
+                    if ( Cowboy_MCP_Rollback::$batch_id !== null ) {
+                        $result['batch_id'] = Cowboy_MCP_Rollback::$batch_id;
+                    }
+                }
+            }
+
+            $text = is_string( $result ) ? $result : wp_json_encode( $result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES );
+            if ( $text === false ) {
+                $text = '(Tool result could not be encoded as JSON.)';
+            }
+            $response = [
+                'content' => [
+                    [ 'type' => 'text', 'text' => $text ],
+                ],
+            ];
+
+            // Add structuredContent when tool has an outputSchema and result is structured data.
+            if ( ! is_string( $result ) && ! empty( self::$tool_map[ $name ]['outputSchema'] ) ) {
+                $response['structuredContent'] = $result;
+            }
+
+            Cowboy_MCP_Audit_Log::set_result( $log_id, 'success' );
+            return $response;
+        } catch ( \Throwable $e ) {
+            if ( $capture !== null ) {
+                Cowboy_MCP_Rollback::discard( $capture );
+            }
+            self::mcp_log( 'tool_exception', [ 'tool' => $name, 'exception' => $e->getMessage() ] );
+            Cowboy_MCP_Audit_Log::set_result( $log_id, 'exception' );
+            return [
+                'content' => [
+                    [ 'type' => 'text', 'text' => 'Exception: ' . $e->getMessage() ],
+                ],
+                'isError' => true,
+            ];
+        }
+    }
+
+    /**
+     * Public proxy for site info — called by Cowboy_MCP_Resources.
+     */
+    public static function tool_site_info(): array {
+        self::load_domains( false );
+        $handler = self::$handlers['wp_site_info'] ?? null;
+        return $handler ? $handler( [] ) : [];
+    }
+
+    /**
+     * Public wrapper so Cowboy_MCP_Rollback (restore/prune, incl. the daily cron)
+     * and dry-run previews can load domain helper functions. Static domains
+     * only: these callers need PHP helpers, not third-party abilities, and must
+     * never instantiate the Abilities registry from cron.
+     */
+    public static function boot_domains(): void {
+        self::load_domains( false );
+    }
+
+    /* ================================================================
+     *  TOOL DEFINITION HELPER
+     * ================================================================ */
+
+    /**
+     * Build a single MCP tool definition array.
+     * Public so domain files can call Cowboy_MCP_Tools::tool().
+     */
+    public static function tool( string $name, string $description, array $properties, array $annotations = [], array $output_schema = [] ): array {
+        $required     = [];
+        $schema_props = [];
+
+        // JSON Schema keywords to forward from property definitions.
+        $schema_keywords = [
+            'type', 'description', 'default', 'items', 'enum',
+            'minimum', 'maximum', 'minItems', 'maxItems',
+            'format', 'examples', 'properties',
+        ];
+
+        foreach ( $properties as $prop_name => $prop ) {
+            $entry = [];
+            foreach ( $schema_keywords as $kw ) {
+                if ( isset( $prop[ $kw ] ) ) {
+                    $entry[ $kw ] = $prop[ $kw ];
+                }
+            }
+            if ( ! isset( $entry['type'] ) ) {
+                $entry['type'] = 'string';
+            }
+            // Forward nested `required` as array (JSON Schema), distinct from
+            // the boolean `required` which marks this property as top-level required.
+            if ( isset( $prop['required'] ) && is_array( $prop['required'] ) ) {
+                $entry['required'] = $prop['required'];
+            }
+            $schema_props[ $prop_name ] = $entry;
+
+            if ( ! empty( $prop['required'] ) && $prop['required'] === true ) {
+                $required[] = $prop_name;
+            }
+        }
+
+        $input_schema = [
+            'type'       => 'object',
+            'properties' => empty( $schema_props ) ? (object) [] : $schema_props,
+        ];
+        if ( ! empty( $required ) ) {
+            $input_schema['required'] = $required;
+        }
+
+        $tool = [
+            'name'        => $name,
+            'description' => $description,
+            'inputSchema' => $input_schema,
+        ];
+
+        if ( $annotations ) {
+            $tool['annotations'] = $annotations;
+        }
+
+        if ( $output_schema ) {
+            $tool['outputSchema'] = $output_schema;
+        }
+
+        return $tool;
+    }
+
+    /* ================================================================
+     *  DRY-RUN PREVIEW
+     * ================================================================ */
+
+    /**
+     * Generate a dry-run preview for a tool call without executing.
+     */
+    private static function generate_dry_run_preview( string $name, array $args ): array {
+        // Strip prefix to extract action and resource.
+        $stripped = $name;
+        foreach ( self::TOOL_PREFIXES as $prefix ) {
+            if ( str_starts_with( $stripped, $prefix ) ) {
+                $stripped = substr( $stripped, strlen( $prefix ) );
+                break;
+            }
+        }
+
+        $parts    = explode( '_', $stripped, 2 );
+        $action   = $parts[0] ?? 'execute';
+        $resource = str_replace( '_', ' ', $parts[1] ?? 'resource' );
+
+        // Find an ID-like argument for the description.
+        $id = null;
+        foreach ( $args as $key => $val ) {
+            if ( $key === 'dry_run' ) continue;
+            if ( preg_match( '/_id$|^id$/', $key ) && is_numeric( $val ) ) {
+                $id = (int) $val;
+                break;
+            }
+        }
+
+        $filtered_args = $args;
+        unset( $filtered_args['dry_run'] );
+
+        $description = "Would {$action} {$resource}";
+        if ( $id ) {
+            $description .= " #{$id}";
+        }
+        $description .= ' with the provided parameters.';
+
+        $preview = [
+            'dry_run'     => true,
+            'tool'        => $name,
+            'action'      => $action,
+            'resource'    => $resource,
+            'description' => $description,
+            'parameters'  => $filtered_args,
+        ];
+        // wp_search_replace scoped to one post: count the real matches in its
+        // post_content. Global previews keep the generic echo.
+        if ( $name === 'wp_search_replace' && array_key_exists( 'post_id', $filtered_args ) ) {
+            self::boot_domains();
+            if ( function_exists( 'cowboy_mcp_search_replace_plan' ) ) {
+                $preview['plan']        = cowboy_mcp_search_replace_plan( $filtered_args );
+                $preview['description'] = "Would search and replace text in post_content of post #{$filtered_args['post_id']}.";
+            }
+        }
+        // Inbound abilities: Cowboy has no model of a third-party ability's effect.
+        if ( ( self::$tool_categories[ $name ] ?? '' ) === 'abilities' ) {
+            $preview['description'] = "Would run ability {$name} with the provided parameters.";
+            $preview['note']        = 'Third-party ability - Cowboy cannot simulate its effect; this preview echoes the input only.';
+            $preview['provider']    = explode( '/', $name, 2 )[0];
+            $preview['undoable']    = false;
+        }
+        // Installer tools: resolve the real WP.org plan (versions, download URL,
+        // backup/checkpoint intentions) — far more useful than the generic echo.
+        if ( class_exists( 'Cowboy_MCP_Installer' ) && in_array( $name, Cowboy_MCP_Installer::TOOLS, true ) ) {
+            $preview['plan'] = Cowboy_MCP_Installer::dry_run_plan( $name, $filtered_args );
+        }
+        // wp_delete_media: name the exact files that would be moved aside, and
+        // anywhere the attachment is still referenced — the generic parameter echo
+        // cannot tell you that deleting this image blanks a featured image.
+        if ( $name === 'wp_delete_media' ) {
+            self::boot_domains();
+            $attachment_id = (int) ( $filtered_args['attachment_id'] ?? 0 );
+            if ( $attachment_id > 0 && function_exists( 'cowboy_mcp_media_file_set' ) ) {
+                $post    = get_post( $attachment_id );
+                $exists  = $post && $post->post_type === 'attachment';
+                $used_as = $exists ? cowboy_mcp_media_usage( $attachment_id ) : [];
+                $preview['plan'] = [
+                    'attachment_id' => $attachment_id,
+                    'exists'        => $exists,
+                    'title'         => $exists ? $post->post_title : null,
+                    'files'         => $exists ? cowboy_mcp_media_file_set( $attachment_id ) : [],
+                    'used_as'       => $used_as,
+                    'warning'       => $used_as ? 'This attachment is still referenced: ' . implode( '; ', $used_as ) : null,
+                    'recoverable'   => 'Files are moved to uploads/cowboy-mcp/trash and can be restored with wp_undo_change until the undo journal is pruned.',
+                ];
+            }
+        }
+        // wp_deactivate_plugin on this plugin: the real call refuses (self_target).
+        if ( $name === 'wp_deactivate_plugin' && Cowboy_MCP_Security::is_own_plugin( (string) ( $filtered_args['plugin_file'] ?? '' ) ) ) {
+            $preview['plan']        = [ 'would_fail' => 'self_target', 'reason' => 'Cowboy MCP cannot deactivate itself.' ];
+            $preview['description'] = 'Would be refused (self_target): Cowboy MCP cannot deactivate itself.';
+        }
+        // wp_write_file: run the real path guards + PHP lint so a preview of a
+        // write that would be refused (mu-plugins, uploads, syntax error) says so.
+        if ( $name === 'wp_write_file' ) {
+            self::boot_domains();
+            if ( function_exists( 'cowboy_mcp_write_file_plan' ) ) {
+                $plan            = cowboy_mcp_write_file_plan( $filtered_args );
+                $preview['plan'] = $plan;
+                if ( ! empty( $plan['would_fail'] ) ) {
+                    $preview['description'] = "Would be refused ({$plan['would_fail']}): {$plan['reason']}";
+                }
+            }
+        }
+        // wp_edit_blocks: resolve the real op plan against the live tree — the
+        // generic parameter echo cannot see inside the operations array.
+        if ( $name === 'wp_edit_blocks' ) {
+            self::boot_domains();
+            if ( function_exists( 'cowboy_mcp_gutenberg_dry_run_plan' ) ) {
+                $preview['plan'] = cowboy_mcp_gutenberg_dry_run_plan( $filtered_args );
+            }
+        }
+        // wp_beaver_update_layout: validate and diff against the live layout.
+        if ( $name === 'wp_beaver_update_layout' ) {
+            self::boot_domains();
+            if ( function_exists( 'cowboy_mcp_beaver_layout_plan' ) ) {
+                $plan            = cowboy_mcp_beaver_layout_plan( $filtered_args );
+                $preview['plan'] = $plan;
+                if ( empty( $plan['valid'] ) ) {
+                    $preview['description'] = 'Would be refused: ' . implode( ' | ', array_slice( (array) ( $plan['errors'] ?? [] ), 0, 3 ) );
+                }
+            }
+        }
+        if ( $name === 'wp_beaver_update_settings' ) {
+            self::boot_domains();
+            if ( function_exists( 'cowboy_mcp_beaver_settings_check' ) ) {
+                $preview['plan'] = cowboy_mcp_beaver_settings_check( $filtered_args['settings'] ?? null, ! empty( $filtered_args['allow_unfiltered_html'] ) );
+            }
+        }
+        // SiteOrigin layout writers: validate, diff and preview sanitizer stripping without writing.
+        if ( in_array( $name, [ 'wp_siteorigin_update_layout', 'wp_siteorigin_edit_layout', 'wp_siteorigin_apply_prebuilt_layout' ], true ) ) {
+            self::boot_domains();
+            if ( function_exists( 'cowboy_mcp_siteorigin_layout_plan' ) ) {
+                $plan            = cowboy_mcp_siteorigin_layout_plan( $name, $filtered_args );
+                $preview['plan'] = $plan;
+                if ( empty( $plan['valid'] ) ) {
+                    $preview['description'] = 'Would be refused: ' . implode( ' | ', array_slice( (array) ( $plan['errors'] ?? [] ), 0, 3 ) );
+                }
+            }
+        }
+        if ( $name === 'wp_siteorigin_update_settings' ) {
+            self::boot_domains();
+            if ( function_exists( 'cowboy_mcp_siteorigin_settings_check' ) ) {
+                $check           = cowboy_mcp_siteorigin_settings_check( $filtered_args['settings'] ?? null );
+                $preview['plan'] = [ 'valid' => ! $check['errors'], 'errors' => $check['errors'], 'changed' => $check['changed'] ];
+            }
+        }
+        if ( $name === 'wp_siteorigin_set_widgets_active' ) {
+            self::boot_domains();
+            if ( function_exists( 'cowboy_mcp_siteorigin_activation_plan' ) ) {
+                $plan            = cowboy_mcp_siteorigin_activation_plan( $filtered_args['widgets'] ?? null, $filtered_args['active'] ?? null );
+                $preview['plan'] = [ 'valid' => ! $plan['errors'] ] + $plan;
+            }
+        }
+        // wp_save_template: say which branch would run (update / materialize / create).
+        if ( $name === 'wp_save_template' ) {
+            self::boot_domains();
+            if ( function_exists( 'cowboy_mcp_gutenberg_save_template_plan' ) ) {
+                $preview['plan'] = cowboy_mcp_gutenberg_save_template_plan( $filtered_args );
+            }
+        }
+
+        // wp_restore_revision: which fields would change, or why it would be refused.
+        if ( $name === 'wp_restore_revision' ) {
+            self::boot_domains();
+            if ( function_exists( 'cowboy_mcp_revision_plan' ) ) {
+                $plan            = cowboy_mcp_revision_plan( (int) ( $filtered_args['revision_id'] ?? 0 ) );
+                $preview['plan'] = $plan;
+                if ( ! empty( $plan['would_fail'] ) ) {
+                    $preview['description'] = "Would be refused ({$plan['would_fail']}): {$plan['reason']}";
+                }
+            }
+        }
+
+        // Events writes: mirror the handlers' refusal rules and report the plan.
+        if ( in_array( $name, [ 'wp_events_update', 'wp_events_delete', 'wp_events_exclude_date' ], true ) ) {
+            self::boot_domains();
+            if ( function_exists( 'cowboy_mcp_events_dry_run_plan' ) ) {
+                $plan            = cowboy_mcp_events_dry_run_plan( $name, $filtered_args );
+                $preview['plan'] = $plan;
+                if ( ! empty( $plan['would_fail'] ) ) {
+                    $preview['description'] = "Would be refused ({$plan['would_fail']}): {$plan['reason']}";
+                }
+            }
+        }
+
+        return [
+            'content' => [[ 'type' => 'text', 'text' => wp_json_encode( $preview, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) ]],
+        ];
+    }
+
+    /* ================================================================
+     *  ERROR SUGGESTIONS
+     * ================================================================ */
+
+    /**
+     * Get a contextual suggestion for an error code.
+     */
+    private static function get_error_suggestion( string $tool_name, string $error_code ): ?string {
+        return match ( $error_code ) {
+            'not_found'      => 'Verify the ID exists. Use wp_cli to list resources (e.g. "wp post list", "wp user list").',
+            'invalid_params' => 'Check the tool definition for required parameters and valid types.',
+            'option_blocked' => 'This option is protected. Use wp_cli with "option get <name>" to read it instead.',
+            'path_escape'    => 'File paths must be relative to wp-content/. Example: themes/mytheme/style.css',
+            'blocked'        => 'This SQL operation is blocked for safety. Use WordPress functions instead.',
+            'tool_blocked'   => 'This tool has been blocked by a filter. Check with the site administrator.',
+            'tool_disabled'  => 'This tool is disabled in Cowboy MCP settings.',
+            'tool_scope_denied' => 'This credential\'s scope does not allow the tool. A site administrator can widen the key\'s scope on the Cowboy MCP settings page.',
+            'confirmation_required' => 'Safe mode is ON. Add confirm: true to the arguments to execute this destructive tool.',
+            'ability_policy_denied' => 'This tool is withheld from the Abilities API (wp_cli and wp_write_file need Power mode; other tools must be in allowed_tools). Call it through the Cowboy MCP endpoint instead.',
+            'ability_invalid_permissions' => "The ability's permission check rejected the current user (Cowboy runs as the first administrator for API keys, or as the OAuth user).",
+            'ability_missing' => 'Call cowboy_discover(category="abilities") to refresh the list of abilities.',
+            default          => null,
+        };
+    }
+
+    /* ================================================================
+     *  GATEWAY MODE
+     * ================================================================ */
+
+    /**
+     * Return the 2 gateway meta-tool definitions.
+     */
+    private static function gateway_tool_definitions(): array {
+        return [
+            self::tool(
+                'cowboy_discover',
+                "Search or browse available WordPress tools by keyword or category. Returns matching MCP tool definitions with name, description, inputSchema, and annotations.\n\nExamples:\n- cowboy_discover(query=\"login failures\") → finds wp_wordfence_update_settings\n- cowboy_discover(query=\"error log\") → finds wp_get_php_error_log\n- cowboy_discover(category=\"wordfence\") → lists all Wordfence tools\n- cowboy_discover(query=\"settings\", category=\"woocommerce\") → WooCommerce settings tools",
+                [
+                    'query' => [
+                        'type'        => 'string',
+                        'description' => "Keyword search, e.g. 'wordfence settings' or 'create post'",
+                    ],
+                    'category' => [
+                        'type'        => 'string',
+                        'description' => 'Browse all tools in a category',
+                        'enum'        => array_keys( self::CATEGORY_DESCRIPTIONS ),
+                    ],
+                ],
+                [
+                    'readOnlyHint'    => true,
+                    'destructiveHint' => false,
+                    'idempotentHint'  => true,
+                    'openWorldHint'   => false,
+                ]
+            ),
+            self::tool(
+                'cowboy_run',
+                "Execute a WordPress tool by name with arguments. Use cowboy_discover first to find the right tool and its inputSchema.\n\nExamples:\n- cowboy_run(tool=\"wp_cli\", arguments={command: \"post list --format=json --posts_per_page=5\"})\n- cowboy_run(tool=\"wp_wordfence_update_settings\", arguments={settings: {maxFailures: 8}})\n- cowboy_run(tool=\"wp_get_hooks\", arguments={hook: \"init\"})",
+                [
+                    'tool' => [
+                        'type'        => 'string',
+                        'description' => 'Tool name from cowboy_discover results',
+                        'required'    => true,
+                    ],
+                    'arguments' => [
+                        'type'        => 'object',
+                        'description' => "Tool arguments per the tool's inputSchema",
+                    ],
+                ],
+                [
+                    'readOnlyHint'    => false,
+                    'destructiveHint' => false,
+                    'idempotentHint'  => false,
+                    'openWorldHint'   => true,
+                ]
+            ),
+        ];
+    }
+
+    /**
+     * Handle the cowboy_discover meta-tool: search/browse tools.
+     */
+    private static function handle_discover_tools( array $args ): array|WP_Error {
+        $query    = trim( $args['query'] ?? '' );
+        $category = $args['category'] ?? '';
+
+        if ( $query === '' && $category === '' ) {
+            return new WP_Error( 'invalid_params', 'Provide a query, a category, or both.', [ 'code' => -32602 ] );
+        }
+
+        $all_tools = Cowboy_MCP_Security::filter_tools_to_scope( self::get_tool_definitions() );
+
+        // Filter by category if specified.
+        if ( $category !== '' ) {
+            if ( ! isset( self::CATEGORY_DESCRIPTIONS[ $category ] ) ) {
+                return new WP_Error( 'invalid_params', "Unknown category: {$category}", [ 'code' => -32602 ] );
+            }
+            $all_tools = array_filter( $all_tools, function ( $tool ) use ( $category ) {
+                return ( self::$tool_categories[ $tool['name'] ] ?? '' ) === $category;
+            } );
+        }
+
+        // If no query, return all tools in the category.
+        if ( $query === '' ) {
+            $all = array_values( $all_tools );
+            return [
+                'total'    => count( $all ),
+                'returned' => count( $all ),
+                'hasMore'  => false,
+                'tools'    => $all,
+            ];
+        }
+
+        // Score and rank by fuzzy keyword relevance.
+        $query_lower = strtolower( $query );
+        $words       = preg_split( '/[\s_]+/', $query_lower, -1, PREG_SPLIT_NO_EMPTY );
+        $scored      = [];
+
+        foreach ( $all_tools as $tool ) {
+            $score      = 0.0;
+            $name_lower = strtolower( $tool['name'] );
+            $name_words = preg_split( '/[_\/-]+/', $name_lower, -1, PREG_SPLIT_NO_EMPTY );   // wp_list_posts, woocommerce/products-query
+            $desc_lower = strtolower( $tool['description'] ?? '' );
+            $desc_words = preg_split( '/[\s,.\-:;()\[\]{}\/]+/', $desc_lower, -1, PREG_SPLIT_NO_EMPTY );
+
+            // Whole-query exact name match dominates.
+            if ( $query_lower === $name_lower ) {
+                $score += 100;
+            }
+
+            // Each query word scores against its best-matching name segment and
+            // description word using fuzzy similarity (exact > stem > substring >
+            // shared-prefix), so "products"/"creating" still find product/create tools.
+            foreach ( $words as $w ) {
+                $best_name = 0.0;
+                foreach ( $name_words as $nw ) {
+                    $best_name = max( $best_name, self::word_similarity( $w, $nw ) );
+                    if ( $best_name >= 1.0 ) {
+                        break;
+                    }
+                }
+                $score += 10 * $best_name;
+
+                $best_desc = 0.0;
+                foreach ( $desc_words as $dw ) {
+                    $best_desc = max( $best_desc, self::word_similarity( $w, $dw ) );
+                    if ( $best_desc >= 1.0 ) {
+                        break;
+                    }
+                }
+                $score += 3 * $best_desc;
+            }
+
+            if ( $score > 0 ) {
+                $scored[] = [ 'score' => $score, 'tool' => $tool ];
+            }
+        }
+
+        // No keyword hits — fail helpfully instead of returning an empty list:
+        // suggest the closest tool names and list the categories available to browse,
+        // so the agent can recover without a blind re-query.
+        if ( empty( $scored ) ) {
+            $present_categories = array_values( array_unique( array_filter( array_map(
+                fn( $t ) => self::$tool_categories[ $t['name'] ] ?? '',
+                $all_tools
+            ) ) ) );
+            sort( $present_categories );
+            return [
+                'total'       => 0,
+                'returned'    => 0,
+                'hasMore'     => false,
+                'tools'       => [],
+                'message'     => "No tools matched \"{$query}\". Try a broader keyword, browse a category, or pick from the suggestions below.",
+                'suggestions' => self::closest_tool_names( $query, $all_tools, 5 ),
+                'categories'  => $present_categories,
+            ];
+        }
+
+        // Sort by score descending, then by name for stability.
+        usort( $scored, function ( $a, $b ) {
+            return $b['score'] <=> $a['score'] ?: strcmp( $a['tool']['name'], $b['tool']['name'] );
+        } );
+
+        // Return the top matches, signalling truncation so the agent knows to narrow
+        // its query rather than assuming it has seen everything.
+        $limit   = 15;
+        $total   = count( $scored );
+        $results = array_map( fn( $s ) => $s['tool'], array_slice( $scored, 0, $limit ) );
+        return [
+            'total'    => $total,
+            'returned' => count( $results ),
+            'hasMore'  => $total > $limit,
+            'tools'    => $results,
+        ];
+    }
+
+    /**
+     * Reduce a token to a loose stem so singular/plural forms match
+     * (e.g. "products" → "product", "categories" → "category").
+     */
+    private static function loose_stem( string $w ): string {
+        if ( strlen( $w ) <= 3 ) {
+            return $w;
+        }
+        if ( str_ends_with( $w, 'ies' ) ) {
+            return substr( $w, 0, -3 ) . 'y';            // categories → category
+        }
+        if ( str_ends_with( $w, 'ses' ) || str_ends_with( $w, 'xes' )
+            || str_ends_with( $w, 'zes' ) || str_ends_with( $w, 'ches' )
+            || str_ends_with( $w, 'shes' ) ) {
+            return substr( $w, 0, -2 );                  // statuses → status, boxes → box
+        }
+        if ( str_ends_with( $w, 's' ) && ! str_ends_with( $w, 'ss' ) && ! str_ends_with( $w, 'us' ) ) {
+            return substr( $w, 0, -1 );                  // products → product (not "class"/"status")
+        }
+        return $w;
+    }
+
+    /**
+     * Fuzzy similarity between a query word and a target word, 0.0–1.0.
+     * Tiered: exact (1.0) > stem (0.9) > substring (0.6) > shared-prefix (0.5).
+     * Short tokens (<4 chars after stemming) only match exactly, to limit noise.
+     */
+    private static function word_similarity( string $qw, string $tw ): float {
+        if ( $qw === $tw ) {
+            return 1.0;
+        }
+        $qs = self::loose_stem( $qw );
+        $ts = self::loose_stem( $tw );
+        if ( $qs === $ts ) {
+            return 0.9;
+        }
+        if ( strlen( $qs ) < 4 || strlen( $ts ) < 4 ) {
+            return 0.0;
+        }
+        if ( str_contains( $ts, $qs ) || str_contains( $qs, $ts ) ) {
+            return 0.6;                                  // permalink ⊃ perm
+        }
+        $min = min( strlen( $qs ), strlen( $ts ) );
+        $cp  = 0;
+        while ( $cp < $min && $qs[ $cp ] === $ts[ $cp ] ) {
+            $cp++;
+        }
+        if ( $cp >= 4 && $cp >= 0.6 * $min ) {
+            return 0.5;                                  // create ~ creating
+        }
+        return 0.0;
+    }
+
+    /**
+     * Rank tools by overall string similarity to a free-text query and return the
+     * closest { name, description } pairs — used for "did you mean" suggestions when a
+     * search or a tool name fails to resolve.
+     *
+     * @param array $tools Tool definition arrays (each with 'name' and 'description').
+     */
+    private static function closest_tool_names( string $query, array $tools, int $limit = 5 ): array {
+        $q      = strtolower( str_replace( [ '_', '/', '-' ], ' ', $query ) );
+        $ranked = [];
+        foreach ( $tools as $tool ) {
+            $name = $tool['name'] ?? '';
+            if ( $name === '' ) {
+                continue;
+            }
+            $hay = strtolower( str_replace( [ '_', '/', '-' ], ' ', $name ) );
+            $pct = 0.0;
+            similar_text( $q, $hay, $pct );
+            $ranked[] = [
+                'pct'         => $pct,
+                'name'        => $name,
+                'description' => self::short_description( $tool['description'] ?? '' ),
+            ];
+        }
+        usort( $ranked, fn( $a, $b ) => $b['pct'] <=> $a['pct'] ?: strcmp( $a['name'], $b['name'] ) );
+        return array_map(
+            fn( $r ) => [ 'name' => $r['name'], 'description' => $r['description'] ],
+            array_slice( $ranked, 0, $limit )
+        );
+    }
+
+    /**
+     * First sentence/line of a tool description, minus the leading "[Category]" tag,
+     * capped for compact catalog and suggestion listings.
+     */
+    private static function short_description( string $desc ): string {
+        $desc = preg_replace( '/^\s*\[[^\]]+\]\s*/', '', $desc );   // drop "[System] " tag
+        $desc = explode( "\n", $desc )[0];                          // first line only
+        if ( preg_match( '/^(.*?[.!?])(\s|$)/', $desc, $m ) ) {
+            $desc = $m[1];                                          // first sentence
+        }
+        $desc = trim( $desc );
+        if ( strlen( $desc ) > 160 ) {
+            $desc = rtrim( substr( $desc, 0, 157 ) ) . '...';
+        }
+        return $desc;
+    }
+
+    /**
+     * Return a full tool catalog for the wordpress://tools/catalog resource.
+     * Includes category breakdown, tool names, and workflow instructions.
+     */
+    public static function get_tool_catalog(): array {
+        self::load_domains();
+
+        // Build category → [ {name, description}, ... ] map so the catalog is a
+        // self-contained index: an agent can find the exact tool name and what it
+        // does in a single read, then call cowboy_run directly (or cowboy_discover
+        // for the full inputSchema) without a trial-and-error keyword search.
+        $defs    = Cowboy_MCP_Security::filter_tools_to_scope( self::get_tool_definitions() );
+        $grouped = [];
+        foreach ( $defs as $def ) {
+            $cat               = self::$tool_categories[ $def['name'] ] ?? 'system';
+            $grouped[ $cat ][] = [
+                'name'        => $def['name'],
+                'description' => self::short_description( $def['description'] ?? '' ),
+            ];
+        }
+
+        $categories = [];
+        foreach ( $grouped as $cat => $tools ) {
+            $categories[ $cat ] = [
+                'count'       => count( $tools ),
+                'description' => self::CATEGORY_DESCRIPTIONS[ $cat ] ?? '',
+                'tools'       => $tools,
+            ];
+        }
+
+        $total = count( $defs );
+
+        $workflow = 'This catalog lists every tool with a one-line description. To act: find the tool here, '
+            . 'then call cowboy_run(tool, arguments). Call cowboy_discover(query|category) only when you need a '
+            . "tool's full inputSchema or want to search by keyword. "
+            . "Example: cowboy_run(tool='wp_wordfence_update_settings', arguments={settings: {maxFailures: 8}})";
+
+        return [
+            'tool_mode'  => 'gateway',
+            'total'      => $total,
+            'workflow'   => $workflow,
+            'categories' => $categories,
+        ];
+    }
+
+    /**
+     * Return gateway catalog: category → count + description (for instructions).
+     */
+    public static function get_gateway_catalog(): array {
+        self::load_domains();
+        $counts = [];
+        foreach ( Cowboy_MCP_Security::filter_tools_to_scope( self::get_tool_definitions() ) as $def ) {
+            $cat            = self::$tool_categories[ $def['name'] ] ?? 'system';
+            $counts[ $cat ] = ( $counts[ $cat ] ?? 0 ) + 1;
+        }
+        $catalog = [];
+        foreach ( self::CATEGORY_DESCRIPTIONS as $cat => $desc ) {
+            if ( isset( $counts[ $cat ] ) ) {
+                $catalog[ $cat ] = [
+                    'count'       => $counts[ $cat ],
+                    'description' => $desc,
+                ];
+            }
+        }
+        return $catalog;
+    }
+
+    /* ================================================================
+     *  DOMAIN LOADING
+     * ================================================================ */
+
+    private static function get_tool_definitions(): array {
+        self::load_domains();
+
+        /**
+         * Filter the full list of MCP tool definitions.
+         *
+         * @param array $tools Array of tool definition arrays.
+         */
+        return apply_filters( 'cowboy_mcp_tools', self::$tools );
+    }
+
+    /**
+     * Whether a conditional domain file's host plugin/theme feature is present.
+     * Single source of truth for the guard at the top of each conditional domain
+     * file AND for the Abilities-bridge index signature. Core domains (any file
+     * not listed) are always available.
+     *
+     * @param string $file `__FILE__` from inside a domain file, or a `dir/file.php` key.
+     */
+    public static function domain_available( string $file ): bool {
+        $key = basename( dirname( $file ) ) . '/' . basename( $file );
+        return match ( $key ) {
+            'acf/tools-acf.php'             => function_exists( 'acf_get_field_groups' ),
+            'woocommerce/products.php',
+            'woocommerce/settings.php'      => class_exists( 'WooCommerce' ) && function_exists( 'wc_get_products' ),
+            'woocommerce/orders.php',
+            'woocommerce/reports.php'       => class_exists( 'WooCommerce' ) && function_exists( 'wc_get_orders' ),
+            'woocommerce/customers.php'     => class_exists( 'WooCommerce' ) && class_exists( 'WC_Customer' ),
+            'woocommerce/coupons.php'       => class_exists( 'WooCommerce' ) && class_exists( 'WC_Coupon' ),
+            'seo/tools-seo.php'             => class_exists( 'WPSEO_Options' ) || defined( 'RANK_MATH_VERSION' ) || defined( 'AIOSEO_VERSION' ) || defined( 'SEOPRESS_VERSION' ),
+            'forms/tools-forms.php'         => function_exists( 'wpforms' ) || class_exists( 'GFAPI' ) || class_exists( 'WPCF7_ContactForm' ),
+            'elementor/tools-elementor.php' => (bool) did_action( 'elementor/loaded' ) || class_exists( '\Elementor\Plugin' ),
+            'beaver-builder/tools-beaver-builder.php' => class_exists( 'FLBuilderModel' ) && class_exists( 'FLBuilder' ),
+            'siteorigin/tools-siteorigin.php' => class_exists( 'SiteOrigin_Panels' ),
+            'wordfence/tools-wordfence.php' => class_exists( 'wordfence' ),
+            'events/tools-events.php'       => class_exists( 'Tribe__Events__Main' ) && function_exists( 'tribe_events' ),
+            default                         => true,
+        };
+    }
+
+    /** Abilities a built-in domain replaces with undoable tools; skipped by the inbound bridge while that domain is available. */
+    private const SUPERSEDED_ABILITIES = [
+        'siteorigin/tools-siteorigin.php' => [ 'siteorigin-panels/layout-get', 'siteorigin-panels/layout-update' ],
+    ];
+
+    /** @return string[] Ability names the inbound bridge must not wrap on this request. */
+    public static function superseded_abilities(): array {
+        $out = [];
+        foreach ( self::SUPERSEDED_ABILITIES as $file => $names ) {
+            if ( self::domain_available( $file ) ) {
+                $out = array_merge( $out, $names );
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * SiteOrigin sub-features that decide which wp_siteorigin_* tools register:
+     * seam = Page Builder >= 2.36.0 layout writer; bundle = Widgets Bundle active.
+     */
+    public static function siteorigin_features(): array {
+        return [
+            'seam'   => class_exists( 'SiteOrigin_Panels_Abilities' ) && method_exists( 'SiteOrigin_Panels_Abilities', 'layout_update' ),
+            'bundle' => class_exists( 'SiteOrigin_Widgets_Bundle' ),
+        ];
+    }
+
+    /** TEC custom tables (CT1) active and migrated — occurrence/series tables are live. */
+    public static function events_ct1_ready(): bool {
+        if ( ! class_exists( 'Tribe__Events__Main' ) || ! function_exists( 'tribe' ) || ! class_exists( '\TEC\Events\Custom_Tables\V1\Provider' ) ) {
+            return false;
+        }
+        try {
+            if ( ! \TEC\Events\Custom_Tables\V1\Provider::is_active() ) {
+                return false;
+            }
+            $state = tribe( \TEC\Events\Custom_Tables\V1\Migration\State::class );
+            return is_object( $state ) && method_exists( $state, 'is_migrated' ) && (bool) $state->is_migrated();
+        } catch ( \Throwable $e ) {
+            return false;
+        }
+    }
+
+    /**
+     * Events Calendar Pro active on top of live custom tables (recurring events supported).
+     * "Active" = Pro's CT1 layer actually booted (its full-activation action fired). When
+     * TEC and Pro versions are incompatible, TEC's dependency check stops Pro from booting
+     * while its main class still loads: no recurrence, no occurrence-id normaliser, and a
+     * stub tribe_is_recurring_event() — class_exists() alone would report a false positive.
+     */
+    public static function events_pro_ready(): bool {
+        if ( ! class_exists( 'Tribe__Events__Pro__Main' ) || ! did_action( 'tec_events_pro_custom_tables_v1_fully_activated' ) ) {
+            return false;
+        }
+        return self::events_ct1_ready();
+    }
+
+    /**
+     * Fingerprint of everything that decides which tools exist: plugin version,
+     * WP version, theme + block-theme status, and every conditional-domain guard.
+     * Cowboy_MCP_Abilities keys its cached definitions index on this.
+     */
+    public static function domain_signature(): string {
+        $guards = [];
+        foreach ( self::CONDITIONAL_DOMAIN_FILES as $file ) {
+            $guards[ $file ] = self::domain_available( $file );
+        }
+        return md5( (string) wp_json_encode( [
+            COWBOY_MCP_VERSION,
+            get_bloginfo( 'version' ),
+            get_stylesheet(),
+            get_template(),
+            wp_is_block_theme(),
+            $guards,
+            self::events_pro_ready(),
+            self::siteorigin_features(),
+        ] ) );
+    }
+
+    /**
+     * Definitions for the outbound Abilities bridge: every static-domain tool
+     * (never the inbound `abilities` wrappers, never filter-added definitions —
+     * those have no handler), gate params injected, with the category map.
+     * Loads the static domains only.
+     *
+     * @return array{tools: array, categories: array<string,string>}
+     */
+    public static function get_bridge_definitions(): array {
+        self::load_domains( false );
+        $tools = [];
+        foreach ( self::$tools as $tool ) {
+            if ( ( self::$tool_categories[ $tool['name'] ] ?? '' ) === 'abilities' ) {
+                continue;
+            }
+            $tools[] = $tool;
+        }
+        return [ 'tools' => $tools, 'categories' => self::$tool_categories ];
+    }
+
+    /** Category of a loaded tool, or null. Inbound wrappers are known once the abilities phase has run. */
+    public static function tool_category( string $name ): ?string {
+        self::load_domains( false );
+        return self::$tool_categories[ $name ] ?? null;
+    }
+
+    /**
+     * Load domain files once and cache tools + handlers. Phase 1 = the static
+     * DOMAIN_FILES. Phase 2 (opt-in via $with_abilities) = the inbound abilities
+     * domain, which enumerates the WordPress Abilities registry and therefore
+     * must not run while wp_abilities_api_init is in progress (partial registry)
+     * nor before init (core asserts did_action('init')).
+     */
+    private static function load_domains( bool $with_abilities = true ): void {
+        if ( ! self::$loaded ) {
+            self::$loaded = true;
+            $dir = COWBOY_MCP_PATH . 'includes/tools/';
+            foreach ( self::DOMAIN_FILES as $file ) {
+                $domain = require $dir . $file;
+                self::append_domain( is_array( $domain ) ? $domain : [], self::CATEGORY_MAP[ $file ] ?? 'system' );
+            }
+        }
+        if ( $with_abilities ) {
+            self::maybe_load_abilities_domain();
+        }
+    }
+
+    /** Phase 2: the inbound abilities domain (see load_domains()). Retried on every entry while pending. */
+    private static function maybe_load_abilities_domain(): void {
+        if ( self::$abilities_loaded || self::$abilities_loading ) {
+            return;
+        }
+        $consume = self::get_settings()['abilities_consume'] ?? true;
+        if ( ! function_exists( 'wp_get_abilities' ) || empty( $consume ) ) {
+            self::$abilities_loaded = true;   // nothing to load on this site / switched off
+            return;
+        }
+        if ( ! did_action( 'init' ) || doing_action( 'wp_abilities_api_init' ) ) {
+            return;                           // pending — the next entry after the action completes loads it
+        }
+        self::$abilities_loading = true;
+        try {
+            $domain = require COWBOY_MCP_PATH . 'includes/tools/abilities/tools-abilities.php';
+            self::append_domain( is_array( $domain ) ? $domain : [], 'abilities' );
+        } catch ( \Throwable $e ) {
+            // A third-party ability's schema blew up the enumeration: leave a trail
+            // before the fatal, since the flags below make this a one-shot load.
+            Cowboy_MCP_Auth::log( 'abilities_domain_failed', [ 'error' => $e->getMessage() ] );
+            throw $e;
+        } finally {
+            self::$abilities_loading = false;
+            self::$abilities_loaded  = true;
+        }
+    }
+
+    /** Append one domain's tools (gate params injected) and handlers to the registry. */
+    private static function append_domain( array $domain, string $category ): void {
+        if ( ! empty( $domain['tools'] ) ) {
+            $tools = self::inject_gate_params( $domain['tools'] );
+            array_push( self::$tools, ...$tools );
+            foreach ( $tools as $tool_def ) {
+                self::$tool_map[ $tool_def['name'] ]        = $tool_def;
+                self::$tool_categories[ $tool_def['name'] ] = $category;
+            }
+        }
+        if ( ! empty( $domain['handlers'] ) ) {
+            self::$handlers = array_merge( self::$handlers, $domain['handlers'] );
+        }
+    }
+
+    /**
+     * Inject the dry_run / confirm parameters into non-read-only tool definitions.
+     * Applied per batch at append time so tools loaded later (phase 2) get them too.
+     */
+    private static function inject_gate_params( array $tools ): array {
+        foreach ( $tools as &$tool ) {
+            $ro = $tool['annotations']['readOnlyHint'] ?? false;
+            if ( ! $ro ) {
+                // tool() uses (object)[] for JSON Schema compliance (serializes as {}),
+                // but array syntax on stdClass is a fatal error in PHP 8.0+.
+                if ( $tool['inputSchema']['properties'] instanceof \stdClass ) {
+                    $tool['inputSchema']['properties'] = [];
+                }
+                $tool['inputSchema']['properties']['dry_run'] = [
+                    'type'        => 'boolean',
+                    'description' => 'If true, preview what this tool would do without making changes.',
+                ];
+            }
+            if ( ! empty( $tool['annotations']['destructiveHint'] ) ) {
+                $tool['inputSchema']['properties']['confirm'] = [
+                    'type'        => 'boolean',
+                    'description' => 'Required when safe mode is ON. Set to true to confirm execution of this destructive operation.',
+                ];
+            }
+        }
+        unset( $tool );
+        return $tools;
+    }
+}
