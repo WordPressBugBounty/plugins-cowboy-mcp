@@ -97,10 +97,6 @@
 .wrap.cmcp select.cmcp-input { line-height: normal; padding-inline-end: 24px; }
 .wrap.cmcp textarea.cmcp-input { height: auto; padding: 8px 10px; font-family: var(--cmcp-mono); font-size: 13px; width: 100%; resize: vertical; }
 .cmcp-formrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.cmcp-icon-btn { border: 1px solid var(--cmcp-border); background: var(--cmcp-surface); border-radius: 5px; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; flex: none; color: var(--cmcp-muted); padding: 0; }
-.cmcp-icon-btn svg { width: 14px; height: 14px; }
-.cmcp-icon-btn.is-copied { color: var(--cmcp-ok); border-color: var(--cmcp-ok-border); }
-.cmcp-icon-btn.is-failed { color: var(--cmcp-danger); border-color: var(--cmcp-danger-border); }
 .cmcp-callout { padding: 10px 12px; border-radius: var(--cmcp-radius-sm); background: var(--cmcp-warn-bg); border: 1px solid var(--cmcp-warn-border); color: #5c3a00; font-size: 13px; margin: 8px 0; }
 .cmcp-callout p { margin: 0; }
 .cmcp-callout--warn { background: var(--cmcp-warn-bg); border-color: var(--cmcp-warn-border); }
@@ -170,6 +166,13 @@ tr.cmcp-panel-row td { padding: 0 18px 14px; background: #fff; }
 @media (max-width: 600px) { .wrap.cmcp .cmcp-fields { grid-template-columns: minmax(0, 1fr); gap: 2px; } .wrap.cmcp .cmcp-fields dd { margin-bottom: 8px; } }
 .wrap.cmcp .cmcp-step-body > p.description { color: var(--cmcp-muted); font-size: 13px; }
 .cmcp-step-body p code, .cmcp-step-body li code, .cmcp-callout code { font-size: 12.5px; background: #efefeb; border-radius: 4px; padding: 1px 5px; }
+/* Paste field: everything the admin pastes into another app (links, chat messages, endpoint, the example prompt). */
+.wrap.cmcp .cmcp-paste { margin: 6px 0 8px; max-width: 76ch; }
+.wrap.cmcp .cmcp-paste-label { display: block; margin: 0 0 4px; font-size: 12px; color: var(--cmcp-muted); }
+.wrap.cmcp .cmcp-paste-field { display: flex; align-items: flex-start; gap: 10px; border: 1px solid var(--cmcp-border); border-radius: var(--cmcp-radius-sm); background: var(--cmcp-surface); padding: 6px 6px 6px 12px; }
+.wrap.cmcp .cmcp-paste-text { flex: 1 1 auto; min-width: 0; padding: 4px 0; font-size: 13.5px; line-height: 1.5; color: var(--cmcp-text); white-space: pre-wrap; overflow-wrap: break-word; }
+.wrap.cmcp .cmcp-paste-copy { flex: none; }
+.wrap.cmcp .cmcp-paste-copy.mcp-copy-btn--copied { color: var(--cmcp-ok); border-color: var(--cmcp-ok-border); }
 .cmcp-term-wrap { border-radius: var(--cmcp-radius-sm); overflow: hidden; background: var(--cmcp-code-bg); margin: 4px 0 8px; }
 .cmcp-term-bar { display: flex; align-items: center; gap: 8px; height: 32px; padding-block: 0; padding-inline: 12px 6px; border-bottom: 1px solid #1d2a20; font-size: 12px; color: var(--cmcp-code-dim); font-family: var(--cmcp-mono); }
 .cmcp-lamp { width: 7px; height: 7px; border-radius: 50%; background: var(--cmcp-code-green); box-shadow: 0 0 6px rgba(60,240,122,.6); }
@@ -187,19 +190,10 @@ tr.cmcp-panel-row td { padding: 0 18px 14px; background: #fff; }
 .wrap.cmcp .cmcp-conn-first [data-mcp-lock-until] { font-variant-numeric: tabular-nums; }
 /* The test prompt: a copyable line instead of a terminal block. */
 /* Example prompt: reads as a quote, not as code (owner ask 2026-10-12). */
-.cmcp-prompt { display: flex; align-items: center; gap: 12px; border: 1px solid var(--cmcp-border); border-left: 3px solid var(--cmcp-ink); border-radius: var(--cmcp-radius-sm); background: var(--cmcp-surface); padding: 10px 10px 10px 14px; margin: 8px 0 0; max-width: 64ch; }
-.wrap.cmcp .cmcp-prompt code { display: block; flex: 1 1 auto; min-width: 0; font-family: inherit; font-style: italic; font-size: 13.5px; line-height: 1.5; background: none; padding: 0; color: var(--cmcp-text); overflow-wrap: normal; }
-.wrap.cmcp .cmcp-prompt code::before { content: "\201C"; color: var(--cmcp-faint); margin-right: 2px; }
-.wrap.cmcp .cmcp-prompt code::after { content: "\201D"; color: var(--cmcp-faint); margin-left: 2px; }
-.wrap.cmcp .cmcp-prompt .cmcp-icon-btn { width: 30px; height: 30px; border-radius: 6px; }
-.wrap.cmcp .cmcp-prompt .cmcp-icon-btn:hover, .wrap.cmcp .cmcp-prompt .cmcp-icon-btn:focus-visible { background: var(--cmcp-ink); border-color: var(--cmcp-ink); color: #fff; }
 /* The "… instead" options sit on one row; an open one takes the full width. */
 .cmcp-inline-sum { display: flex; gap: 12px; flex-wrap: wrap; }
 .wrap.cmcp .cmcp-inline-sum .mcp-local-details { margin: 6px 0 0; }
 .wrap.cmcp .cmcp-inline-sum .mcp-local-details[open] { flex-basis: 100%; }
-.cmcp-step-body .mcp-substeps { margin: 4px 0 0; padding: 0; counter-reset: cmcpsub; list-style: none; }
-.cmcp-step-body .mcp-substeps li { position: relative; padding-block: 4px; padding-inline: 28px 0; color: var(--cmcp-text); }
-.cmcp-step-body .mcp-substeps li::before { counter-increment: cmcpsub; content: counter(cmcpsub); position: absolute; inset-inline-start: 0; top: 5px; width: 19px; height: 19px; border-radius: 50%; border: 1px solid var(--cmcp-border-strong); font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; color: var(--cmcp-muted); }
 .wrap.cmcp .mcp-local-details { margin: 10px 0; }
 .wrap.cmcp .mcp-local-details > summary { cursor: pointer; font-size: 13px; color: var(--cmcp-muted); text-decoration: underline; text-decoration-color: var(--cmcp-border-strong); text-underline-offset: 3px; }
 .wrap.cmcp .mcp-local-details > summary:hover, .wrap.cmcp .mcp-local-details[open] > summary { color: var(--cmcp-text); }
@@ -403,7 +397,6 @@ tr.cmcp-detail pre.cmcp-term { font-size: 12.5px; max-height: 320px; overflow: a
 	.cmcp-tab { padding-inline: 8px; font-size: 13.5px; }
 	.cmcp-tab[aria-current="page"]::after { left: 8px; right: 8px; }
 }
-.wrap.cmcp .cmcp-copy-note { margin: 8px 0; color: var(--cmcp-ok); font-weight: 600; }
 .wrap.cmcp .cmcp-connect-status { display: flex; gap: 12px; align-items: center; padding: 10px 14px; border-radius: var(--cmcp-radius-sm); border: 1px solid var(--cmcp-border); background: var(--cmcp-surface); margin: 0 0 16px; font-size: 13px; }
 .wrap.cmcp .cmcp-connect-status--connected { border-color: var(--cmcp-ok-border); background: var(--cmcp-ok-bg, #edfaef); color: var(--cmcp-ok); }
 .wrap.cmcp .cmcp-connect-status--blocked { border-color: var(--cmcp-warn-border); background: var(--cmcp-warn-bg); }
@@ -412,3 +405,55 @@ tr.cmcp-detail pre.cmcp-term { font-size: 12.5px; max-height: 320px; overflow: a
 .wrap.cmcp .cmcp-connect-status-window { margin-inline-start: auto; display: inline-flex; align-items: center; gap: 10px; color: var(--cmcp-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .wrap.cmcp .cmcp-connect-status-window form { display: inline; margin: 0; }
 .wrap.cmcp .cmcp-connect-status-window .cmcp-linkbtn { font-size: 13px; }
+
+/* ── Cowboy Hub promo: banner under the header + dismissed-state pill (Cowboy_MCP_Hub_Promo) ── */
+.wrap.cmcp > .cmcp-hub { position: relative; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 28px; align-items: center; padding: 20px 24px 20px 26px; background: var(--cmcp-code-bg); border-color: #0b100c; color: var(--cmcp-code-text); }
+.cmcp-hub::before { content: ""; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(420px 160px at 46% 50%, rgba(60,240,122,.14), transparent 70%); }
+.cmcp-hub::after { content: ""; position: absolute; top: 0; left: 0; height: 1px; width: 220px; background: linear-gradient(90deg, transparent, var(--cmcp-code-green), transparent); opacity: 0; animation: cmcp-hub-streamer 11s cubic-bezier(.5,0,.2,1) infinite; pointer-events: none; }
+@keyframes cmcp-hub-streamer { 0% { transform: translateX(-220px); opacity: 0; } 3% { opacity: 1; } 40% { transform: translateX(1500px); opacity: 1; } 41% { opacity: 0; } 100% { transform: translateX(-220px); opacity: 0; } }
+.cmcp-hub-copy { position: relative; min-width: 0; }
+.wrap.cmcp .cmcp-hub h2 { font-size: 19px; font-weight: 600; letter-spacing: -.01em; color: #fff; margin: 0 0 6px; padding: 0; line-height: 1.25; }
+.wrap.cmcp .cmcp-hub p { margin: 0 0 12px; max-width: 72ch; font-size: 13.5px; line-height: 1.5; color: #b9d1c2; }
+.wrap.cmcp .cmcp-hub-points { list-style: none; margin: 0 0 16px; padding: 0; display: grid; grid-template-columns: max-content max-content; column-gap: 32px; row-gap: 6px; }
+.wrap.cmcp .cmcp-hub-points li { position: relative; margin: 0; padding-inline-start: 14px; font-size: 13.5px; line-height: 1.5; color: var(--cmcp-code-text); white-space: nowrap; }
+.wrap.cmcp .cmcp-hub-points li::before { content: ""; position: absolute; inset-inline-start: 0; top: 7px; width: 6px; height: 6px; border-radius: 50%; background: var(--cmcp-code-green); }
+@media (max-width: 1280px) { .wrap.cmcp .cmcp-hub-points { grid-template-columns: 1fr; } }
+@media (max-width: 782px) { .wrap.cmcp .cmcp-hub-points li { white-space: normal; } }
+.cmcp-hub-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.wrap.cmcp .cmcp-hub-cta { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding-inline: 16px 14px; border-radius: 6px; background: var(--cmcp-code-green); color: #04140a; font-size: 14px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.wrap.cmcp .cmcp-hub-cta:hover, .wrap.cmcp .cmcp-hub-cta:focus-visible { background: #fff; color: #04140a; }
+.cmcp-hub-cta svg { width: 14px; height: 14px; transition: transform .2s ease; }
+.cmcp-hub-cta:hover svg { transform: translateX(3px); }
+.rtl .cmcp-hub-cta svg { transform: scaleX(-1); }
+.rtl .cmcp-hub-cta:hover svg { transform: scaleX(-1) translateX(3px); }
+.wrap.cmcp .cmcp-hub :focus-visible { outline-color: #fff; }
+.cmcp-hub-x { position: absolute; top: 10px; inset-inline-end: 10px; width: 28px; height: 28px; padding: 0; border: 0; background: none; border-radius: 6px; color: var(--cmcp-code-dim); font-size: 18px; line-height: 1; cursor: pointer; z-index: 2; }
+.cmcp-hub-x:hover, .cmcp-hub-x:focus-visible { color: #fff; background: rgba(255,255,255,.08); }
+.cmcp-hub-art { position: relative; width: 450px; height: 128px; margin-inline-end: 10px; }
+.cmcp-hub-art svg { width: 100%; height: 100%; overflow: visible; }
+.cmcp-hub-wire { fill: none; stroke: #2a3a2f; stroke-width: 1; }
+.cmcp-hub-node { fill: #4c6252; }
+.cmcp-hub-agentbox { fill: #121a14; stroke: #2f4536; stroke-width: 1; }
+.cmcp-hub-lbl { font: 11px var(--cmcp-mono); fill: var(--cmcp-code-dim); }
+.cmcp-hub-lbl--b { fill: #cfeedd; }
+.cmcp-hub-pulse { opacity: 0; }
+.cmcp-hub-dot { fill: var(--cmcp-code-green); }
+.cmcp-hub-halo { fill: var(--cmcp-code-green); opacity: .22; }
+@media (max-width: 1180px) { .cmcp-hub-art { width: 340px; height: 97px; } }
+@media (max-width: 1000px) { .wrap.cmcp > .cmcp-hub { grid-template-columns: 1fr; } .cmcp-hub-art { display: none; } }
+@media (max-width: 782px) { .wrap.cmcp > .cmcp-hub { padding: 16px 16px 18px; } }
+/* dismissed state: a black pill in the brand row, right after the version; a wave of green pixels sweeps through it every 6 s */
+.wrap.cmcp .cmcp-hub-pill { position: relative; overflow: hidden; isolation: isolate; margin-inline-start: 4px; display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 13px; border-radius: 999px; background: var(--cmcp-code-bg); border: 1px solid #2f4536; color: #fff; font-size: 13px; font-weight: 500; text-decoration: none; white-space: nowrap; transition: background-color .2s ease; }
+.wrap.cmcp .cmcp-hub-pill:hover, .wrap.cmcp .cmcp-hub-pill:focus-visible { color: #fff; background: #0f1711; }
+/* hover: no border change; the wave widens a little and runs faster with no rest, brightness stays close to resting so the white caption keeps its contrast */
+.wrap.cmcp .cmcp-hub-pill:hover::before, .wrap.cmcp .cmcp-hub-pill:focus-visible::before { background: conic-gradient(from 90deg at 2px 2px, rgba(60,240,122,.62) 25%, transparent 0) 0 0 / 4px 4px; -webkit-mask-image: linear-gradient(135deg, transparent calc(50% - 64px), #000 50%, transparent calc(50% + 64px)); mask-image: linear-gradient(135deg, transparent calc(50% - 64px), #000 50%, transparent calc(50% + 64px)); animation: cmcp-hub-pixel-wave-fast 2.2s linear infinite; }
+@keyframes cmcp-hub-pixel-wave-fast { 0% { -webkit-mask-position: 100% 0; mask-position: 100% 0; } 100% { -webkit-mask-position: 0% 0; mask-position: 0% 0; } }
+.wrap.cmcp .cmcp-hub-pill:focus-visible { box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--cmcp-ink); }
+.wrap.cmcp .cmcp-hub-pill:focus, .wrap.cmcp .cmcp-hub-pill:active { border-radius: 999px; outline: none; }
+.cmcp-hub-pill span { position: relative; z-index: 1; text-shadow: 0 1px 2px rgba(0,0,0,.55); }
+/* pixel grid: one 2x2 mint square per 4x4 cell, revealed by a soft band slanted 45deg that travels left to right (5 s, on screen almost the whole way), then rests 1.5 s; 6.5 s cycle */
+.cmcp-hub-pill::before { content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none; background: conic-gradient(from 90deg at 2px 2px, rgba(60,240,122,.55) 25%, transparent 0) 0 0 / 4px 4px; -webkit-mask-image: linear-gradient(135deg, transparent calc(50% - 48px), #000 50%, transparent calc(50% + 48px)); mask-image: linear-gradient(135deg, transparent calc(50% - 48px), #000 50%, transparent calc(50% + 48px)); -webkit-mask-size: 230% 100%; mask-size: 230% 100%; -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; -webkit-mask-position: 100% 0; mask-position: 100% 0; animation: cmcp-hub-pixel-wave 6.5s cubic-bezier(.3,0,.7,1) infinite; }
+@keyframes cmcp-hub-pixel-wave { 0% { -webkit-mask-position: 100% 0; mask-position: 100% 0; } 77% { -webkit-mask-position: 0% 0; mask-position: 0% 0; } 100% { -webkit-mask-position: 0% 0; mask-position: 0% 0; } }
+@media (max-width: 782px) { .wrap.cmcp .cmcp-hub-pill { margin: 2px 0 8px; } }
+.cmcp-hub.is-leaving { opacity: 0; transition: opacity .28s ease; }
+@media (prefers-reduced-motion: reduce) { .cmcp-hub::after, .cmcp-hub-pill::before, .wrap.cmcp .cmcp-hub-pill:hover::before { animation: none; } }

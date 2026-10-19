@@ -3,7 +3,7 @@
  * Plugin Name: Cowboy MCP
  * Plugin URI:  https://cowboymcp.com
  * Description: Turns your WordPress site into a Model Context Protocol (MCP) server so AI agents like Claude, ChatGPT, Cursor and Claude Code can read, edit, and manage everything on the site - with per-change undo and database checkpoints.
- * Version:     1.7.3
+ * Version:     1.7.4
  * Author:      februality
  * Author URI:  https://profiles.wordpress.org/februality/
  * License:     GPL-2.0-or-later
@@ -41,7 +41,7 @@ along with Cowboy MCP. If not, see https://www.gnu.org/licenses/gpl-2.0.html.
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'COWBOY_MCP_VERSION', '1.7.3' );
+define( 'COWBOY_MCP_VERSION', '1.7.4' );
 define( 'COWBOY_MCP_PATH',    plugin_dir_path( __FILE__ ) );
 define( 'COWBOY_MCP_URL',     plugin_dir_url( __FILE__ ) );
 
@@ -68,6 +68,7 @@ require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin-activity.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin-logs.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin-settings.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-feedback.php';
+require_once COWBOY_MCP_PATH . 'admin/class-mcp-hub-promo.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-repair-notice.php';
 
 /* ── Boot ─────────────────────────────────────────────────── */
@@ -81,6 +82,7 @@ add_action( 'plugins_loaded', function () {
     Cowboy_MCP_Transport::init();
     Cowboy_MCP_Admin::init();
     Cowboy_MCP_Feedback::init();
+    Cowboy_MCP_Hub_Promo::init();
     Cowboy_MCP_Repair_Notice::init();
     Cowboy_MCP_OAuth::init();
     Cowboy_MCP_Abilities::init();
@@ -201,6 +203,7 @@ function cowboy_mcp_uninstall(): void {
     // Remove per-user admin preferences (remembered connection method).
     delete_metadata( 'user', 0, 'cowboy_mcp_conn_method', '', true );
     delete_metadata( 'user', 0, 'cowboy_mcp_conn_client', '', true );
+    delete_metadata( 'user', 0, 'cowboy_mcp_hub_promo_dismissed', '', true );
 
     // Drop audit log table.
     global $wpdb;

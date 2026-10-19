@@ -217,6 +217,7 @@ class Cowboy_MCP_Admin {
             'startNonce'   => wp_create_nonce( 'cowboy_mcp_start_connect' ),
             'connNonce'    => wp_create_nonce( 'cowboy_mcp_set_conn_client' ),
             'blockedNonce' => wp_create_nonce( 'cowboy_mcp_dismiss_blocked' ),
+            'hubNonce'     => wp_create_nonce( Cowboy_MCP_Hub_Promo::NONCE ),
             'cancel'       => __( 'Cancel', 'cowboy-mcp' ),
             'confirm'      => __( 'Confirm', 'cowboy-mcp' ),
             'copied'       => __( 'Copied!', 'cowboy-mcp' ),
@@ -387,7 +388,7 @@ class Cowboy_MCP_Admin {
             exit;
         }
 
-        // "Open ChatGPT": connector on + window open, then a new tab to ChatGPT (no prefill link exists; the JS copied the URL).
+        // "Open ChatGPT": connector on + window open, then a new tab to ChatGPT (no prefill link exists; the admin copies the link shown above the button).
         if ( isset( $_POST['cowboy_mcp_open_chatgpt'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ?? '' ) ), 'cowboy_mcp_open_chatgpt' ) && class_exists( 'Cowboy_MCP_OAuth' ) ) {
             self::enable_oauth_connector();
             Cowboy_MCP_OAuth::open_registration_window();
@@ -622,6 +623,7 @@ class Cowboy_MCP_Admin {
                     <img class="cmcp-logo" src="<?php echo esc_url( COWBOY_MCP_URL . 'admin/images/icon-128.png' ); ?>" alt="" width="32" height="32">
                     <span class="cmcp-name"><?php esc_html_e( 'Cowboy MCP', 'cowboy-mcp' ); ?></span>
                     <span class="cmcp-ver">v<?php echo esc_html( COWBOY_MCP_VERSION ); ?></span>
+                    <?php Cowboy_MCP_Hub_Promo::render_pill( ! Cowboy_MCP_Hub_Promo::is_dismissed() ); ?>
                     <?php self::render_exceptions( $settings ); ?>
                 </div>
                 <nav class="cmcp-tabs" aria-label="<?php esc_attr_e( 'Cowboy MCP sections', 'cowboy-mcp' ); ?>">
@@ -631,6 +633,7 @@ class Cowboy_MCP_Admin {
                 </nav>
             </header>
             <?php self::render_offbar( $settings ); ?>
+            <?php Cowboy_MCP_Hub_Promo::render_banner(); ?>
             <h1 class="screen-reader-text"><?php echo esc_html( $tabs[ $active_tab ] ); ?></h1>
             <div class="cmcp-body">
                 <?php

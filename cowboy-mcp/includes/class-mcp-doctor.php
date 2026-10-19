@@ -175,8 +175,8 @@ class Cowboy_MCP_Doctor {
 				$extra = ' ' . $n . ( 1 === $n ? ' attempt' : ' attempts' ) . ' blocked in the last 24 h (latest: ' . $blocked[0]['app'] . ', ' . $mins . ' min ago).' . ( $open ? ' Earlier attempts were blocked; retry the app now.' : '' );
 			}
 			// Closed is the normal resting state: the Connections tab opens it when an app is
-			// connected, and Claude Code / Codex use Client ID Metadata Documents and never
-			// need it. Only an app that was actually refused makes this a warning.
+			// connected, and Claude Code / Codex / Hermes Agent use Client ID Metadata Documents
+			// and never need it. Only an app that was actually refused makes this a warning.
 			$out[] = self::result(
 				'registration_window',
 				'New connections switch',
@@ -185,7 +185,7 @@ class Cowboy_MCP_Doctor {
 					? ( $left > 0 ? 'Open for another ' . (int) ceil( $left / 60 ) . ' min - new AI apps can register.' : 'Held open by a filter.' ) . $extra
 					: ( $blocked
 						? 'Off, and an app was refused.' . $extra
-						: 'Off - normal. It switches on by itself when you connect an app from the Connections tab; Claude Code and Codex identify themselves with a metadata document and never need it. Existing connections keep working.' ),
+						: 'Off - normal. It switches on by itself when you connect an app from the Connections tab; Claude Code, Codex and Hermes Agent identify themselves with a metadata document and never need it. Existing connections keep working.' ),
 				[],
 				null,
 				( $open || ! $blocked ) ? null : 'Under Settings > Cowboy MCP > Connections, pick the app ("Connect another app" if the list is not shown) and click "Enable for 30 minutes" (New connections), then add the app again.'
@@ -360,7 +360,150 @@ class Cowboy_MCP_Doctor {
 			$checks[] = self::result( $id, 'OAuth discovery: ' . $path, $ok ? 'pass' : 'fail', $ok ? 'Discovery document served correctly.' : "Expected JSON with '{$want}', got HTTP {$code}.", [ 'HTTP ' . $code ], $fp, $ok ? null : ( $fix ?? 'A cache plugin or server rule is likely intercepting root .well-known paths - exclude them from caching/rewrites.' ) );
 		}
 
+		$checks[] = self::cloudflare_check( $env_headers, $endpoint );
+
 		return [ 'checks' => $checks, 'env_headers' => $env_headers ];
+	}
+
+	/** User agent of the Cloudflare probe: what Muse's connector sent when Cloudflare answered 1010. */
+	const SCRIPT_USER_AGENT = 'Python-urllib/3.12';
+
+	/** Step-by-step Cloudflare setup (skip rule, Bot Fight Mode, AI bot policies) on the project site. */
+	const CLOUDFLARE_GUIDE = 'https://cowboymcp.com/guides/cloudflare-blocking-ai-apps-wordpress';
+
+	/**
+	 * Cloudflare skip-rule expression: the MCP endpoint and the OAuth routes under it. The
+	 * /.well-known/oauth-* discovery documents stay out on purpose - Muse's sign-in fetches them
+	 * from Meta's own servers, which passed Browser Integrity Check (verified live 2026-10-14);
+	 * only its sandboxed MCP client was refused, and only on /wp-json/cowboy-mcp/.
+	 */
+	const CLOUDFLARE_RULE = 'starts_with(http.request.uri.path, "/wp-json/cowboy-mcp/")';
+
+	/**
+	 * Cloudflare in front of the site. Cloud AI apps reach the site from data centres,
+	 * some with a bare HTTP library's user agent (Muse: Python-urllib), and Browser
+	 * Integrity Check (error 1010) or a bot challenge stops them before WordPress logs
+	 * anything - while the browser and the loopback checks above look healthy. The probe
+	 * repeats the endpoint request with a script user agent; the loopback
+	 * leaves through the public DNS name, so it crosses Cloudflare as an app would.
+	 * Advisory: Bot Fight Mode scores the app's own servers, which this cannot imitate.
+	 */
+	private static function cloudflare_check( array $env_headers, string $endpoint ): array {
+		$id      = 'cloudflare';
+		$label   = 'Cloudflare lets AI apps through';
+		$via_cf  = self::is_cloudflare( $env_headers );
+		$cf_seen = $via_cf || self::request_via_cloudflare();
+		if ( ! $cf_seen ) {
+			return self::result( $id, $label, 'skip', 'Cloudflare not detected in front of this site.' );
+		}
+		if ( ! $via_cf ) {
+			return self::result( $id, $label, 'pass', 'Cloudflare is in front of this site, but this server reaches itself without going through Cloudflare, so its settings cannot be tested from here. If a cloud AI app cannot connect and the site logs nothing, skip Browser Integrity Check for ' . self::CLOUDFLARE_RULE . ' in Cloudflare. Guide: ' . self::CLOUDFLARE_GUIDE );
+		}
+
+		$probes = [ [ 'POST', $endpoint, 401 ] ];
+		$blocked  = [];
+		$other    = [];
+		$evidence = [ 'probe User-Agent: ' . self::SCRIPT_USER_AGENT ];
+		$codes    = [];
+		foreach ( $probes as [ $method, $url, $want ] ) {
+			$path = (string) wp_parse_url( $url, PHP_URL_PATH );
+			$r    = self::loopback( $method, $url, [
+				'user-agent' => self::SCRIPT_USER_AGENT,
+				'headers'    => array_filter( [ 'Accept' => '*/*', 'Content-Type' => 'POST' === $method ? 'application/json' : null ] ),
+				'body'       => 'POST' === $method ? self::initialize_body() : null,
+			] );
+			if ( is_wp_error( $r ) ) {
+				$other[]    = $path;
+				$evidence[] = "{$method} {$path} -> " . $r->get_error_message();
+				continue;
+			}
+			$code    = (int) wp_remote_retrieve_response_code( $r );
+			$headers = array_change_key_case( wp_remote_retrieve_headers( $r )->getAll(), CASE_LOWER );
+			$body    = (string) wp_remote_retrieve_body( $r );
+			if ( $want === $code && is_array( json_decode( $body, true ) ) ) {
+				continue;
+			}
+			$block = self::cloudflare_block( $code, $headers, $body );
+			$ray   = is_array( $headers['cf-ray'] ?? '' ) ? implode( ',', $headers['cf-ray'] ) : (string) ( $headers['cf-ray'] ?? '' );
+			if ( null !== $block ) {
+				$blocked[]  = $path;
+				$codes[]    = $block;
+				$evidence[] = "{$method} {$path} -> HTTP {$code}, " . self::cloudflare_reason( $block ) . ( '' !== $ray ? ", cf-ray {$ray}" : '' );
+			} else {
+				$other[]    = $path;
+				$evidence[] = "{$method} {$path} -> HTTP {$code} (expected {$want})";
+			}
+		}
+
+		if ( $blocked ) {
+			$fix = 'In Cloudflare go to Security > Security rules > Create rule > Custom rules, use the expression ' . self::CLOUDFLARE_RULE . ', choose the Skip action and select Browser Integrity Check (and All Super Bot Fight Mode rules on Pro plans and above). Bot Fight Mode on the Free plan cannot be skipped by a rule: if it challenges AI apps, turn it off under Security > Settings.';
+			if ( in_array( '1020', $codes, true ) ) {
+				$fix .= ' Error 1020 means one of your own rules blocked the request: find it under Security > Analytics > Events and exempt the same paths.';
+			}
+			$fix .= ' Step-by-step guide: ' . self::CLOUDFLARE_GUIDE;
+			return self::result(
+				$id,
+				$label,
+				'warn',
+				'Cloudflare blocked a script-style request (the kind some cloud AI apps send, such as Muse) to ' . implode( ', ', $blocked ) . '. Apps that hit this cannot connect, and WordPress never sees the request.',
+				$evidence,
+				'cloudflare_block',
+				$fix
+			);
+		}
+		if ( $other ) {
+			return self::result( $id, $label, 'warn', 'A script-style request to ' . implode( ', ', $other ) . ' got an unexpected answer, while the same request from WordPress passed. Something filters by user agent (Cloudflare or a server firewall).', $evidence, null, 'Check Security > Analytics > Events in Cloudflare and your host\'s firewall (ModSecurity) for the blocked request, then exempt ' . self::CLOUDFLARE_RULE . '. Guide: ' . self::CLOUDFLARE_GUIDE );
+		}
+		return self::result( $id, $label, 'pass', 'Cloudflare is in front of this site and let a script-style request reach the MCP endpoint. Bot Fight Mode judges each app\'s own servers, so if one app still cannot connect, check Security > Analytics > Events in Cloudflare (guide: ' . self::CLOUDFLARE_GUIDE . ').', $evidence );
+	}
+
+	/**
+	 * True when the current request arrived through Cloudflare (it adds CF-Ray to every request it
+	 * proxies to the origin). Advisory display only - the header is trivially spoofable.
+	 */
+	public static function request_via_cloudflare(): bool {
+		return ! empty( $_SERVER['HTTP_CF_RAY'] );
+	}
+
+	/** True when response headers came through Cloudflare. */
+	private static function is_cloudflare( array $headers ): bool {
+		$headers = array_change_key_case( $headers, CASE_LOWER );
+		$server  = is_array( $headers['server'] ?? '' ) ? implode( ',', $headers['server'] ) : (string) ( $headers['server'] ?? '' );
+		return isset( $headers['cf-ray'] ) || false !== stripos( $server, 'cloudflare' );
+	}
+
+	/**
+	 * A response Cloudflare itself generated: an "error code: 10xx" block page or a
+	 * challenge. Returns the error code, 'challenge', or null for origin responses.
+	 */
+	private static function cloudflare_block( int $code, array $headers, string $body ): ?string {
+		if ( ! self::is_cloudflare( $headers ) || $code < 400 ) {
+			return null;
+		}
+		if ( ! empty( $headers['cf-mitigated'] ) || preg_match( '/just a moment|cf-chl|challenge-platform/i', $body ) ) {
+			return 'challenge';
+		}
+		// Plain-text page ("error code: 1010"), or the HTML page's feedback script / help link.
+		if ( preg_match( '/error ?code:?\s*(1\d{3})\b|cloudflare-1xxx-errors\/error-(1\d{3})\b/i', $body, $m ) ) {
+			$m[1] = '' !== $m[1] ? $m[1] : $m[2];
+			return $m[1];
+		}
+		if ( preg_match( '/used Cloudflare to restrict access/i', $body ) ) {
+			return 'blocked';
+		}
+		return null;
+	}
+
+	/** Plain-English name of a Cloudflare block. */
+	private static function cloudflare_reason( string $block ): string {
+		return match ( $block ) {
+			'1010'      => 'Cloudflare error 1010 (Browser Integrity Check)',
+			'1020'      => 'Cloudflare error 1020 (a firewall rule)',
+			'1015'      => 'Cloudflare error 1015 (rate limiting)',
+			'challenge' => 'Cloudflare challenge (Bot Fight Mode, Security Level or a challenge rule)',
+			'blocked'   => 'Cloudflare access denied',
+			default     => 'Cloudflare error ' . $block,
+		};
 	}
 
 	/**
@@ -371,6 +514,7 @@ class Cowboy_MCP_Doctor {
 	public static function fingerprints_for_js(): array {
 		return [
 			[ 'id' => 'cloudflare_challenge', 'status' => [ 403, 503 ], 'header' => [ 'server', '/cloudflare/i' ], 'body_regex' => '/just a moment|cf-chl|challenge-platform/i', 'fix' => 'Cloudflare is challenging the request. Add a WAF skip rule (or disable Bot Fight Mode) for /wp-json/cowboy-mcp/* and /.well-known/oauth-*.' ],
+			[ 'id' => 'cloudflare_block', 'status' => [ 403 ], 'header' => [ 'server', '/cloudflare/i' ], 'body_regex' => '/error code:?\s*1\d{3}|used Cloudflare to restrict access/i', 'fix' => 'Cloudflare blocked the request (error 1010 = Browser Integrity Check, 1020 = a firewall rule). Add a custom rule with the Skip action for /wp-json/cowboy-mcp/* that skips Browser Integrity Check.' ],
 			[ 'id' => 'modsecurity', 'status' => [ 403, 406 ], 'header' => null, 'body_regex' => '/mod_security|modsecurity|not acceptable/i', 'fix' => 'A web application firewall (likely ModSecurity) is blocking JSON POSTs. Ask your host to allowlist POST /wp-json/cowboy-mcp/v1/endpoint.' ],
 			[ 'id' => 'basic_auth', 'status' => [ 401 ], 'header' => [ 'www-authenticate', '/basic/i' ], 'body_regex' => null, 'fix' => 'Server-level Basic Auth answers before WordPress. Exclude /wp-json/cowboy-mcp/ and /.well-known/ from Basic Auth - MCP clients cannot send two Authorization headers.' ],
 			[ 'id' => 'dirty_json', 'status' => null, 'header' => null, 'body_regex' => '/^(\xEF\xBB\xBF|\s+)[\{\[]/', 'fix' => 'The JSON response has junk before it (BOM, whitespace, or a PHP notice). Set WP_DEBUG_DISPLAY to false and deactivate plugins one by one to find the one printing output.' ],

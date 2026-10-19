@@ -43,7 +43,7 @@ class Cowboy_MCP_OAuth {
      * via the cowboy_mcp_oauth_redirect_hosts filter; oauth_redirect_allowlist=false
      * restores the old any-host behaviour.
      */
-    const DEFAULT_REDIRECT_HOSTS = [ 'chatgpt.com', 'openai.com', 'claude.ai', 'claude.com', 'anthropic.com', 'vscode.dev', 'cursor.com', 'perplexity.ai', 'perplexity.com', 'n8n.cloud', 'grok.com', 'mistral.ai', 'antigravity.google', 'oauth-redirect.googleusercontent.com' ]; // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- OAuth redirect-host allowlist entry (Gemini app callback), not an asset URL.
+    const DEFAULT_REDIRECT_HOSTS = [ 'chatgpt.com', 'openai.com', 'claude.ai', 'claude.com', 'anthropic.com', 'vscode.dev', 'cursor.com', 'perplexity.ai', 'perplexity.com', 'n8n.cloud', 'grok.com', 'mistral.ai', 'antigravity.google', 'oauth-redirect.googleusercontent.com', 'meta.ai' ]; // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- OAuth redirect-host allowlist entry (Gemini app callback), not an asset URL.
     const LOOPBACK_HOSTS         = [ 'localhost', '127.0.0.1', '::1' ];
     /**
      * Private-use redirect URIs accepted verbatim (RFC 8252 §7.1), mapped to the client slug.
@@ -68,6 +68,10 @@ class Cowboy_MCP_OAuth {
         'lechat'      => 'Le Chat',
         'gemini-app'  => 'Gemini',
         'antigravity' => 'Antigravity',
+        'muse'        => 'Muse',
+        'muse-code'   => 'Muse Code',
+        'openclaw'    => 'OpenClaw',
+        'hermes'      => 'Hermes Agent',
         'zed'         => 'Zed',
         'cline'       => 'Cline',
         'goose'       => 'Goose',
@@ -184,7 +188,7 @@ class Cowboy_MCP_OAuth {
             'chatgpt.com' => 'ChatGPT', 'openai.com' => 'ChatGPT',
             'claude.ai' => 'Claude', 'claude.com' => 'Claude', 'anthropic.com' => 'Claude',
             'vscode.dev' => 'VS Code', 'cursor.com' => 'Cursor', 'perplexity.ai' => 'Perplexity', 'n8n.cloud' => 'n8n',
-            'grok.com' => 'Grok', 'mistral.ai' => 'Le Chat', 'oauth-redirect.googleusercontent.com' => 'Gemini', 'antigravity.google' => 'Antigravity', // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- OAuth redirect-host allowlist entry (Gemini app callback), not an asset URL.
+            'grok.com' => 'Grok', 'mistral.ai' => 'Le Chat', 'oauth-redirect.googleusercontent.com' => 'Gemini', 'antigravity.google' => 'Antigravity', 'meta.ai' => 'Muse', // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- OAuth redirect-host allowlist entry (Gemini app callback), not an asset URL.
         ];
         foreach ( $map as $base => $label ) {
             if ( $host === $base || str_ends_with( $host, '.' . $base ) ) {
@@ -219,7 +223,7 @@ class Cowboy_MCP_OAuth {
             'chatgpt.com' => 'chatgpt', 'openai.com' => 'chatgpt',
             'claude.ai' => 'claude', 'claude.com' => 'claude', 'anthropic.com' => 'claude',
             'vscode.dev' => 'vscode', 'cursor.com' => 'cursor', 'perplexity.ai' => 'perplexity', 'n8n.cloud' => 'n8n',
-            'grok.com' => 'grok', 'mistral.ai' => 'lechat', 'oauth-redirect.googleusercontent.com' => 'gemini-app', 'antigravity.google' => 'antigravity', // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- OAuth redirect-host allowlist entry (Gemini app callback), not an asset URL.
+            'grok.com' => 'grok', 'mistral.ai' => 'lechat', 'oauth-redirect.googleusercontent.com' => 'gemini-app', 'antigravity.google' => 'antigravity', 'meta.ai' => 'muse', // phpcs:ignore PluginCheck.CodeAnalysis.Offloading.OffloadedContent -- OAuth redirect-host allowlist entry (Gemini app callback), not an asset URL.
         ];
         $all_loopback = ! empty( $uris );
         foreach ( $uris as $u ) {
@@ -240,7 +244,9 @@ class Cowboy_MCP_OAuth {
             return null;
         }
         $name = strtolower( trim( (string) ( $row['client_name'] ?? '' ) ) );
-        foreach ( [ 'claude code' => 'claude-code', 'codex' => 'codex', 'gemini cli' => 'gemini-cli', 'visual studio code' => 'vscode', 'cursor' => 'cursor', 'opencode' => 'opencode', 'mcp cli' => 'mcp-remote', 'zed' => 'zed', 'cline' => 'cline', 'goose' => 'goose', 'amp' => 'amp', 'kiro' => 'kiro', 'qwen code' => 'qwen-code', 'kilo' => 'kilo', 'raycast' => 'raycast', 'windsurf' => 'windsurf', 'devin' => 'windsurf', 'n8n' => 'n8n' ] as $prefix => $slug ) {
+        // OpenClaw registers as "OpenClaw MCP" on 127.0.0.1:8989 (bundle src/agents/mcp-oauth-provider.ts, 2026.10.4); Hermes Agent
+        // as "Hermes Agent" (DCR) or through its CIMD document of the same name (tools/mcp_oauth.py) - both verified 2026-10-16.
+        foreach ( [ 'claude code' => 'claude-code', 'codex' => 'codex', 'gemini cli' => 'gemini-cli', 'visual studio code' => 'vscode', 'cursor' => 'cursor', 'opencode' => 'opencode', 'openclaw' => 'openclaw', 'hermes' => 'hermes', 'muse code' => 'muse-code', 'mcp cli' => 'mcp-remote', 'zed' => 'zed', 'cline' => 'cline', 'goose' => 'goose', 'amp' => 'amp', 'kiro' => 'kiro', 'qwen code' => 'qwen-code', 'kilo' => 'kilo', 'raycast' => 'raycast', 'windsurf' => 'windsurf', 'devin' => 'windsurf', 'n8n' => 'n8n' ] as $prefix => $slug ) {
             if ( str_starts_with( $name, $prefix ) ) {
                 return $slug;
             }
@@ -274,13 +280,13 @@ class Cowboy_MCP_OAuth {
         Cowboy_MCP_Auth::store_client_info( 'oauth', $cid, $info );
     }
 
-    /** Slug from an MCP initialize clientInfo (names verified from each client's source, 2026-10-07; n8n 2.42.6 MCP Client Tool node, observed 2026-10-10). */
+    /** Slug from an MCP initialize clientInfo (names verified from each client's source, 2026-10-07; n8n 2.42.6 MCP Client Tool node, observed 2026-10-10; Muse Code 1.4.8 sends its internal name `tbh` / `0.1.0`, the Muse app `muse-custom-connector` / `1`, both observed 2026-10-14; OpenClaw's embedded runtime `openclaw-bundle-mcp` / `0.0.0`, 2026.10.4 source + live 2026-10-16. Hermes Agent passes no clientInfo, so the SDK default `mcp` / `0.1.0` arrives - generic, the row label wins). */
     public static function client_slug_for_info( $info ): ?string {
         if ( ! is_array( $info ) || empty( $info['name'] ) ) {
             return null;
         }
         $name = (string) $info['name'];
-        $map  = [ 'claude-code' => 'claude-code', 'codex-mcp-client' => 'codex', 'gemini-cli-mcp-client' => 'gemini-cli', 'cursor-vscode' => 'cursor', 'opencode' => 'opencode', '@n8n/n8n-nodes-langchain.mcpClientTool' => 'n8n' ];
+        $map  = [ 'claude-code' => 'claude-code', 'codex-mcp-client' => 'codex', 'gemini-cli-mcp-client' => 'gemini-cli', 'cursor-vscode' => 'cursor', 'opencode' => 'opencode', '@n8n/n8n-nodes-langchain.mcpClientTool' => 'n8n', 'tbh' => 'muse-code', 'muse-custom-connector' => 'muse', 'openclaw-bundle-mcp' => 'openclaw' ];
         if ( isset( $map[ $name ] ) ) {
             return $map[ $name ];
         }
@@ -451,7 +457,11 @@ class Cowboy_MCP_OAuth {
      * a JSON document claiming to be "Claude Code". Administrators extend it with the same
      * extra-hosts setting as redirects, or via the cowboy_mcp_oauth_cimd_hosts filter.
      */
-    const CIMD_DOCUMENT_HOSTS = [ 'claude.ai', 'claude.com', 'anthropic.com', 'chatgpt.com', 'openai.com', 'perplexity.ai', 'perplexity.com' ]; // Perplexity: https://www.perplexity.ai/.well-known/mcp-client.json (verified live 2026-10-12; no DCR any more)
+    // Hermes Agent (Nous Research) publishes https://nousresearch.github.io/hermes-agent/docs/oauth/client-metadata.json
+    // and sends it as client_id whenever the server advertises CIMD (verified in tools/mcp_oauth.py, main 2026-10-16); it
+    // falls back to DCR only on an invalid_client at the token endpoint, so refusing the host would dead-end every sign-in.
+    // The host is the NousResearch GitHub Pages origin - a single owner, unlike github.io itself.
+    const CIMD_DOCUMENT_HOSTS = [ 'claude.ai', 'claude.com', 'anthropic.com', 'chatgpt.com', 'openai.com', 'perplexity.ai', 'perplexity.com', 'nousresearch.github.io' ]; // Perplexity: https://www.perplexity.ai/.well-known/mcp-client.json (verified live 2026-10-12; no DCR any more)
 
     /**
      * Whether a client_id is a Client ID Metadata Document URL
@@ -667,11 +677,12 @@ class Cowboy_MCP_OAuth {
     }
 
     /**
-     * redirect_uri match against a metadata document: exact, or - for loopback hosts -
-     * any port (RFC 8252 §7.3; the Claude Code and Codex documents list the port-less
-     * form and the client picks an ephemeral port). Path, scheme and host still must match.
+     * redirect_uri match against a client's registered URIs (DCR row or metadata document):
+     * exact, or - for loopback hosts - any port (RFC 8252 §7.3). The Claude Code and Codex
+     * documents list the port-less form, and Muse Code reuses its registration on the next
+     * `muse mcp login` with a fresh ephemeral port. Path, scheme and host still must match.
      */
-    public static function cimd_redirect_matches( string $uri, array $registered ): bool {
+    public static function redirect_matches( string $uri, array $registered ): bool {
         if ( in_array( $uri, $registered, true ) ) {
             return true;
         }
@@ -1590,7 +1601,7 @@ class Cowboy_MCP_OAuth {
                 'adopted'                    => time(),
             ];
         }
-        if ( ! $cimd && ( $redirect_uri === '' || ! in_array( $redirect_uri, $client['redirect_uris'], true ) ) ) {
+        if ( ! $cimd && ( $redirect_uri === '' || ! self::redirect_matches( $redirect_uri, (array) $client['redirect_uris'] ) ) ) {
             self::authorize_fatal( __( 'Invalid redirect_uri for this client.', 'cowboy-mcp' ) );
         }
 
@@ -1614,7 +1625,7 @@ class Cowboy_MCP_OAuth {
                 Cowboy_MCP_Auth::log( 'oauth_cimd_rejected', [ 'args' => [ 'code' => $doc->get_error_code(), 'host' => (string) wp_parse_url( $client_id, PHP_URL_HOST ) ] ] );
                 self::authorize_fatal( self::cimd_error_message( $doc, $client_id ) );
             }
-            if ( $redirect_uri === '' || ! self::cimd_redirect_matches( $redirect_uri, $doc['redirect_uris'] ) ) {
+            if ( $redirect_uri === '' || ! self::redirect_matches( $redirect_uri, $doc['redirect_uris'] ) ) {
                 Cowboy_MCP_Auth::log( 'oauth_cimd_rejected', [ 'args' => [ 'code' => 'redirect_uri', 'host' => (string) wp_parse_url( $client_id, PHP_URL_HOST ) ] ] );
                 self::authorize_fatal( __( 'Invalid redirect_uri for this client.', 'cowboy-mcp' ) );
             }
