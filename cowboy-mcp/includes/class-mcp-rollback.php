@@ -52,6 +52,21 @@ class Cowboy_MCP_Rollback {
 	 */
 	private const TEC_VOLATILE_META = [ '_tribe_modified_fields', '_EventOccurrencesCount' ];
 
+	/**
+	 * Core's ping queue: every save of a published post re-adds these
+	 * (_publish_post_hook) and the do_pings cron deletes them on a later request.
+	 * Not post data, so snapshots leave them out (a cron run is never a conflict)
+	 * and restore_post() leaves the live rows alone.
+	 */
+	private const PING_META = [ '_encloseme', '_pingme' ];
+
+	/** Real columns of {$wpdb->comments}; get_comment( …, ARRAY_A ) adds children, populated_children, post_fields. */
+	private const COMMENT_COLUMNS = [
+		'comment_ID', 'comment_post_ID', 'comment_author', 'comment_author_email', 'comment_author_url',
+		'comment_author_IP', 'comment_date', 'comment_date_gmt', 'comment_content', 'comment_karma',
+		'comment_approved', 'comment_agent', 'comment_type', 'comment_parent', 'user_id',
+	];
+
 	/** @var array|null Current capture handle (between begin() and commit()/discard()). */
 	private static ?array $pending = null;
 
@@ -589,6 +604,7 @@ class Cowboy_MCP_Rollback {
 				}
 				$meta = get_post_meta( (int) $id );
 				unset( $meta['_edit_lock'], $meta['_edit_last'] ); // volatile; false conflicts
+				$meta = array_diff_key( $meta, array_flip( self::PING_META ) );
 				$terms = [];
 				foreach ( get_object_taxonomies( $post['post_type'] ) as $tax ) {
 					$t = wp_get_object_terms( (int) $id, $tax, [ 'fields' => 'ids' ] );
@@ -1104,10 +1120,14 @@ class Cowboy_MCP_Rollback {
 		$live_id = (int) $result;
 
 		// Meta: clear current, re-add captured (values are stored serialized-raw arrays).
+		// The ping queue stays as core left it; journal rows from before 1.7.5 still carry it.
+		$meta = array_diff_key( (array) $state['meta'], array_flip( self::PING_META ) );
 		foreach ( array_keys( get_post_meta( $live_id ) ) as $k ) {
-			delete_post_meta( $live_id, $k );
+			if ( ! in_array( $k, self::PING_META, true ) ) {
+				delete_post_meta( $live_id, $k );
+			}
 		}
-		foreach ( $state['meta'] as $k => $values ) {
+		foreach ( $meta as $k => $values ) {
 			foreach ( (array) $values as $v ) {
 				add_post_meta( $live_id, $k, self::slash_deep( maybe_unserialize( $v ) ) );
 			}
@@ -1403,9 +1423,12 @@ class Cowboy_MCP_Rollback {
 			$row['comment_ID'] = $cid;
 			wp_update_comment( wp_slash( $row ) );
 		} else {
+			$row = array_intersect_key( (array) $state['comment'], array_flip( self::COMMENT_COLUMNS ) );
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
-			$wpdb->insert( $wpdb->comments, $state['comment'] );
-			wp_update_comment_count( (int) $state['comment']['comment_post_ID'] );
+			if ( ! $wpdb->insert( $wpdb->comments, $row ) ) {
+				return new WP_Error( 'undo_failed', "Could not reinsert comment #{$cid}." );
+			}
+			wp_update_comment_count( (int) $row['comment_post_ID'] );
 		}
 		foreach ( array_keys( get_comment_meta( $cid ) ) as $k ) {
 			delete_comment_meta( $cid, $k );
@@ -1502,6 +1525,12 @@ class Cowboy_MCP_Rollback {
 		foreach ( (array) ( $refs['thumbnail_post_ids'] ?? [] ) as $post_id ) {
 			if ( get_post( (int) $post_id ) ) {
 				update_post_meta( (int) $post_id, '_thumbnail_id', $attachment_id );
+			}
+		}
+		// WordPress 7.2+ crop lineage: point the edited copies back at their original.
+		foreach ( (array) ( $refs['edited_copy_ids'] ?? [] ) as $copy_id ) {
+			if ( get_post_type( (int) $copy_id ) === 'attachment' ) {
+				update_post_meta( (int) $copy_id, '_wp_attachment_edit_root_id', $attachment_id );
 			}
 		}
 		if ( ! empty( $refs['site_icon'] ) ) {
@@ -1617,7 +1646,15 @@ class Cowboy_MCP_Rollback {
 					return new WP_Error( 'undo_conflict', 'Undoing this creation would delete the last administrator.' );
 				}
 			}
-			return Cowboy_MCP_Compat::delete_user( $uid, null )
+			// Multisite: the creation made a network account, so its undo deletes the account —
+			// but only while nothing outside this site depends on it.
+			if ( is_multisite() ) {
+				$elsewhere = array_diff( array_keys( get_blogs_of_user( $uid, true ) ), [ get_current_blog_id() ] );
+				if ( $elsewhere || is_super_admin( $uid ) ) {
+					return new WP_Error( 'undo_conflict', "User #{$uid} has since been added to another site in the network or made a super admin; undoing the creation would delete the account everywhere. Remove them from this site with wp_delete_user instead." );
+				}
+			}
+			return Cowboy_MCP_Compat::delete_user( $uid, null, true )
 				? true
 				: new WP_Error( 'undo_failed', "Could not remove user #{$uid}." );
 		}
@@ -1741,7 +1778,8 @@ class Cowboy_MCP_Rollback {
 			$pre_undo     = self::snapshot( $type, $id );
 			$current_hash = self::state_hash( $pre_undo );
 		}
-		if ( ! $force && $row['after_hash'] !== null && $row['after_hash'] !== '' && $current_hash !== $row['after_hash'] ) {
+		if ( ! $force && $row['after_hash'] !== null && $row['after_hash'] !== '' && $current_hash !== $row['after_hash']
+			&& ! self::legacy_ping_hash_matches( $type, $pre_undo, (string) $row['after_hash'] ) ) {
 			return new WP_Error(
 				'undo_conflict',
 				"Conflict: '{$row['object_label']}' ({$type} {$id}) has been modified since change #{$change_id} was made. "
@@ -1772,6 +1810,7 @@ class Cowboy_MCP_Rollback {
 		$after_undo      = $type === 'db_rows'
 			? [ 'values' => self::db_rows_current_values( $row['before_state']['rows'] ?? [] ) ]
 			: self::snapshot( $type, $id );
+		$verification    = self::verify_restore( $type, $row['before_state'], $after_undo, (string) $row['action'] );
 		$redo_supported = ! ( $type === 'media' && $redo_action === 'delete' );
 		$redo_reason    = 'Re-creating a deleted attachment is not supported.';
 		if ( $type === 'media_file' ) {
@@ -1822,7 +1861,17 @@ class Cowboy_MCP_Rollback {
 			$note = 'Files restored to the previous version. Database changes made by the update (migrations) are NOT reverted — restore the pre-update checkpoint if the update ran migrations.';
 		}
 
+		if ( $verification['verified'] === false ) {
+			$note = trim( ( $note ? $note . ' ' : '' ) . 'Verification: the live state still differs from the captured before-state in '
+				. implode( ', ', $verification['differences'] ) . '. Inspect the object before relying on this undo.' );
+		}
 		$response = [ 'undone' => true, 'change_id' => $change_id, 'redo_change_id' => $redo_change_id, 'note' => $note ];
+		if ( $verification['verified'] !== null ) {
+			$response['verified'] = $verification['verified'];
+			if ( $verification['verified'] === false ) {
+				$response['differences'] = $verification['differences'];
+			}
+		}
 		if ( $marked === false || $marked === 0 ) {
 			$response['warning'] = 'Object restored, but the journal row could not be marked undone (possible concurrent undo).';
 		}
@@ -1972,6 +2021,32 @@ class Cowboy_MCP_Rollback {
 		return $state;
 	}
 
+	/**
+	 * Journal rows written before 1.7.5 hashed post snapshots WITH core's ping queue
+	 * (PING_META). Core always stores both keys as a single '1', so the four
+	 * combinations cover every after_hash such a row can hold: no false conflict
+	 * after the upgrade, while a real edit still changes all four hashes.
+	 */
+	private static function legacy_ping_hash_matches( string $type, ?array $live, string $after_hash ): bool {
+		if ( $live === null || ( $type !== 'post' && $type !== 'tec_event' ) ) {
+			return false;
+		}
+		foreach ( [ [ '_encloseme' ], [ '_pingme' ], self::PING_META ] as $keys ) {
+			$state = $live;
+			foreach ( $keys as $k ) {
+				if ( $type === 'tec_event' ) {
+					$state['post']['meta'][ $k ] = [ '1' ];
+				} else {
+					$state['meta'][ $k ] = [ '1' ];
+				}
+			}
+			if ( hash_equals( $after_hash, self::state_hash( $state ) ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/** sha256 of canonical JSON; null (absent object) → ABSENT_HASH sentinel. */
 	public static function state_hash( ?array $state ): string {
 		if ( $state === null ) {
@@ -1981,6 +2056,74 @@ class Cowboy_MCP_Rollback {
 		// its own (e.g. TEC's shutdown re-sync) — never evidence of a later edit.
 		unset( $state['_volatile'] );
 		return hash( 'sha256', (string) wp_json_encode( self::canonical( $state ) ) );
+	}
+
+	/**
+	 * After an undo, compare the live state with the before-state it restored.
+	 * Returns [ 'verified' => bool|null, 'differences' => string[] ]; null means the
+	 * type has no comparable snapshot (raw db rows). Fields WordPress rewrites on
+	 * every save (post_modified*) and `_volatile` blobs are ignored. Advisory only:
+	 * a false never fails the undo, it is surfaced in the tool result.
+	 */
+	public static function verify_restore( string $type, ?array $expected, ?array $actual, string $action = '' ): array {
+		// db_rows has no comparable snapshot; media_file's before-state is the handler's
+		// trash bookkeeping and snapshot() returns null for it even after a good restore.
+		// A deleted menu or WooCommerce object comes back under a NEW id, so a snapshot
+		// of the old id is always empty.
+		if ( $type === 'db_rows' || $type === 'media_file'
+			|| ( $action === 'delete' && ( $type === 'menu' || $type === 'wc_object' ) ) ) {
+			return [ 'verified' => null, 'differences' => [] ];
+		}
+		// Installer rows also journal backup_zip/folder; only the version is live state.
+		if ( ( $type === 'plugin_files' || $type === 'theme_files' ) && $expected !== null ) {
+			$expected = array_intersect_key( $expected, [ 'version' => true ] );
+		}
+		if ( $expected === null || $actual === null ) {
+			$ok = ( $expected === null ) === ( $actual === null );
+			return [ 'verified' => $ok, 'differences' => $ok ? [] : [ $expected === null ? 'object still exists' : 'object missing' ] ];
+		}
+		$exp = self::canonical( self::verifiable( $expected ) );
+		$act = self::canonical( self::verifiable( $actual ) );
+		if ( wp_json_encode( $exp ) === wp_json_encode( $act ) ) {
+			return [ 'verified' => true, 'differences' => [] ];
+		}
+		$diff = [];
+		foreach ( array_unique( array_merge( array_keys( $exp ), array_keys( $act ) ) ) as $k ) {
+			$e = $exp[ $k ] ?? null;
+			$a = $act[ $k ] ?? null;
+			if ( wp_json_encode( $e ) === wp_json_encode( $a ) ) {
+				continue;
+			}
+			if ( is_array( $e ) && is_array( $a ) ) {
+				foreach ( array_unique( array_merge( array_keys( $e ), array_keys( $a ) ) ) as $sk ) {
+					if ( wp_json_encode( $e[ $sk ] ?? null ) !== wp_json_encode( $a[ $sk ] ?? null ) ) {
+						$diff[] = "{$k}.{$sk}";
+					}
+				}
+			} else {
+				$diff[] = (string) $k;
+			}
+		}
+		$diff = array_slice( $diff, 0, 20 );
+		return [ 'verified' => $diff === [], 'differences' => $diff ];
+	}
+
+	/** Strip the fields a restore cannot reproduce byte-for-byte. */
+	private static function verifiable( array $state ): array {
+		// reassigned_to records what a user delete did; a live user snapshot always has null.
+		unset( $state['_volatile'], $state['reassigned_to'] );
+		if ( isset( $state['post'] ) && is_array( $state['post'] ) ) {
+			unset( $state['post']['post_modified'], $state['post']['post_modified_gmt'] );
+			// Before-states journaled by 1.7.4 and earlier still include the ping queue.
+			if ( isset( $state['meta'] ) && is_array( $state['meta'] ) ) {
+				$state['meta'] = array_diff_key( $state['meta'], array_flip( self::PING_META ) );
+			}
+			// A draft with no fixed date (zero post_date_gmt) gets post_date = now on every save.
+			if ( ( $state['post']['post_date_gmt'] ?? '' ) === '0000-00-00 00:00:00' ) {
+				unset( $state['post']['post_date'] );
+			}
+		}
+		return $state;
 	}
 
 	/* ── Row IO ────────────────────────────────────────────── */

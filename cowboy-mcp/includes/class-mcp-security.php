@@ -45,9 +45,65 @@ class Cowboy_MCP_Security {
     /* ── Option denylist ───────────────────────────────────── */
 
     /**
+     * Whether an option/meta/transient name is plain printable ASCII once trimmed.
+     *
+     * The options table compares names with an accent-, width- and case-insensitive
+     * collation (utf8mb4_unicode_520_ci, utf8mb4_0900_ai_ci), so `cowböy_mcp_settings`,
+     * a fullwidth letter or a zero-width space selects and updates the real
+     * `cowboy_mcp_settings` row while matching none of the denylist patterns. Every
+     * name check below treats a non-plain name as protected (fail closed).
+     */
+    public static function is_plain_name( string $name ): bool {
+        $name = trim( $name );
+        // Longer than wp_options.option_name (191): wpdb turns strict mode off, so MySQL
+        // cuts the name on save, and a PAD SPACE collation then matches `default_role`
+        // + spaces + `x` against the real `default_role` row (overwritten in wp-env).
+        return strlen( $name ) <= 191 && (bool) preg_match( '/^[\x20-\x7e]+$/', $name );
+    }
+
+    /**
+     * Stored option names a write to $name binds to. The table collation, not PHP,
+     * decides which rows `WHERE option_name = %s` matches, so write gates judge these
+     * as well as the name the agent sent.
+     *
+     * @return string[]
+     */
+    public static function stored_option_names( string $name ): array {
+        global $wpdb;
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, PluginCheck.Security.DirectDB.UnescapedDBParameter -- collation probe; must hit the table, never the options cache.
+        $rows = $wpdb->get_col( $wpdb->prepare( "SELECT option_name FROM {$wpdb->options} WHERE option_name = %s", trim( $name ) ) );
+        return array_map( 'strval', (array) $rows );
+    }
+
+    /**
+     * Why a write to option $name must be refused: 'invalid' (not plain ASCII),
+     * 'hard' (never writable), 'soft' (writable only in Power mode), or null.
+     * Checks the given name and every stored name it binds to.
+     */
+    public static function option_write_block( string $name ): ?string {
+        if ( ! self::is_plain_name( $name ) ) {
+            return 'invalid';
+        }
+        $names = array_unique( array_merge( [ $name ], self::stored_option_names( $name ) ) );
+        $block = null;
+        foreach ( $names as $candidate ) {
+            if ( self::is_hard_protected_option( $candidate ) ) {
+                return 'hard';
+            }
+            if ( self::is_protected_option( $candidate ) ) {
+                $block = 'soft';
+            }
+        }
+        return $block;
+    }
+
+    /**
      * Whether an option is protected from writes (wp_update_option, wp_woo_update_setting).
      */
     public static function is_protected_option( string $name ): bool {
+        if ( ! self::is_plain_name( $name ) ) {
+            return true;
+        }
         $name = strtolower( trim( $name ) );
         if ( in_array( $name, self::PROTECTED_OPTIONS, true ) ) {
             return true;
@@ -72,7 +128,78 @@ class Cowboy_MCP_Security {
             return true;
         }
         $name = strtolower( trim( $name ) );
-        return (bool) preg_match( '/secret|token|_api_key|api_key|_key$|password|nonce/', $name );
+        return (bool) preg_match( self::SECRET_OPTION_NAMES, $name );
+    }
+
+    /**
+     * Option names whose whole value is a secret: generic credential words, the
+     * wp-config-style salts/keys stored as options, WordPress's recovery-mode keys,
+     * and plugins that keep tokens under innocuous names (Jetpack, Freemius,
+     * WooCommerce.com helper).
+     */
+    private const SECRET_OPTION_NAMES = '/secret|token|api_?key|_key$|_salt$|password|nonce|^recovery_keys$|_private_options$|^fs_accounts$|^woocommerce_helper_data$/';
+
+    /**
+     * Settings blobs known to carry credentials somewhere inside (SMTP passwords,
+     * licence keys, CDN/Cloudflare tokens, backup-storage credentials). Readable
+     * through the redacting paths (redact_option_value()); refused where the value
+     * cannot be redacted (wp_cli output).
+     */
+    private const SECRET_BEARING_OPTIONS = '/^(wp_mail_smtp|edd_settings|give_settings|wp_rocket_settings|w3tc_config|wpforms_settings|post_smtp_options|swpsmtp_options|easy_wp_smtp)$|^updraft_|^litespeed\.conf\./';
+
+    /** Whether an option's value carries secrets inside it (see SECRET_BEARING_OPTIONS). */
+    public static function is_secret_bearing_option( string $name ): bool {
+        return self::is_sensitive_option( $name ) || (bool) preg_match( self::SECRET_BEARING_OPTIONS, strtolower( trim( $name ) ) );
+    }
+
+    /** Key parts (letters only, lower-cased) that mark a nested setting as a secret. */
+    private const SECRET_VALUE_KEY_PARTS = [ 'pass', 'pwd', 'secret', 'token', 'bearer', 'nonce', 'salt', 'licence', 'license', 'credential', 'private', 'signature' ];
+
+    /**
+     * Redact an option value for display: every nested entry whose key reads as a
+     * credential is masked, and remaining strings lose Bearer tokens, MCP keys and
+     * payment-provider secret keys. Objects (incl. unserialized plugin classes) are
+     * flattened to arrays first. Display only — never write the result back.
+     */
+    public static function redact_option_value( mixed $value ): mixed {
+        if ( is_object( $value ) ) {
+            $value = json_decode( (string) wp_json_encode( $value ), true );
+        }
+        if ( is_array( $value ) ) {
+            foreach ( $value as $key => &$item ) {
+                // Booleans and empty strings say nothing secret (`use_password: false`) — keep them.
+                if ( is_string( $key ) && self::value_key_is_secret( $key ) && ! is_bool( $item ) && null !== $item && '' !== $item ) {
+                    $item = '[REDACTED]';
+                } else {
+                    $item = self::redact_option_value( $item );
+                }
+            }
+            unset( $item );
+            return $value;
+        }
+        if ( is_string( $value ) ) {
+            $value = self::scrub_secrets( $value );
+            return (string) preg_replace( '/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{8,}|\bwhsec_[A-Za-z0-9]{8,}/', '[REDACTED]', $value );
+        }
+        return $value;
+    }
+
+    /** Whether a nested settings key names a credential (camelCase- and separator-safe). */
+    private static function value_key_is_secret( string $key ): bool {
+        $norm = (string) preg_replace( '/[^a-z]/', '', strtolower( $key ) );
+        if ( '' === $norm ) {
+            return false;
+        }
+        // apikey, authkey, licensekey, consumerkey, secretkey, cfkey, …
+        if ( str_ends_with( $norm, 'key' ) || str_ends_with( $norm, 'keys' ) ) {
+            return true;
+        }
+        foreach ( self::SECRET_VALUE_KEY_PARTS as $part ) {
+            if ( str_contains( $norm, $part ) ) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -82,6 +209,9 @@ class Cowboy_MCP_Security {
      * template, stylesheet, cron, {prefix}user_roles, woocommerce_*_settings, …).
      */
     public static function is_hard_protected_option( string $name ): bool {
+        if ( ! self::is_plain_name( $name ) ) {
+            return true;
+        }
         $name = strtolower( trim( $name ) );
         if ( $name === 'cowboy_mcp_api_keys' || $name === 'cowboy_mcp_settings' ) {
             return true;
@@ -180,6 +310,25 @@ class Cowboy_MCP_Security {
         $real    = realpath( $abs_path );
         $target  = $real !== false ? $real : $abs_path;
         return $target === $storage || str_starts_with( $target . '/', $storage . '/' );
+    }
+
+    /* ── Who administers the plugin ────────────────────────── */
+
+    /**
+     * The capability that administers Cowboy MCP: the settings page, credentials,
+     * OAuth consent and Cowboy's abilities. On multisite a sub-site administrator has
+     * manage_options, but wp_cli, the file tools and checkpoints reach the whole
+     * network (shared wp-content, network tables), so only a super admin qualifies
+     * (manage_network_options is held by super admins alone).
+     */
+    public static function admin_capability(): string {
+        return is_multisite() ? 'manage_network_options' : 'manage_options';
+    }
+
+    /** Whether a user may administer Cowboy MCP (see admin_capability()). */
+    public static function user_is_plugin_admin( int|WP_User $user ): bool {
+        $user_obj = $user instanceof WP_User ? $user : get_userdata( (int) $user );
+        return $user_obj && $user_obj->exists() && user_can( $user_obj, self::admin_capability() );
     }
 
     /* ── Power mode ────────────────────────────────────────── */
@@ -351,6 +500,47 @@ class Cowboy_MCP_Security {
             || stripos( $normalized, 'cowboy_mcp_oauth_refresh' ) !== false;
     }
 
+    /**
+     * Whether a (normalized) query is one read statement: it starts with SELECT,
+     * SHOW, DESCRIBE/DESC or EXPLAIN and has no statement separator before an
+     * optional trailing one. A `;` inside a string literal also counts — refusing
+     * that is the safe direction. Empty input is not a read.
+     */
+    public static function sql_is_single_read( string $normalized ): bool {
+        $sql = rtrim( trim( $normalized ), "; \t" );
+        if ( '' === $sql || str_contains( $sql, ';' ) ) {
+            return false;
+        }
+        return (bool) preg_match( '/^\(*\s*(SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i', $sql );
+    }
+
+    /**
+     * Why `wp search-replace` may not run without Power mode, or null. Pure.
+     *
+     * @param string[] $tables Positionals after `search-replace <old> <new>`.
+     * @param string[] $flags  Flag tokens.
+     */
+    public static function cli_search_replace_reason( array $tables, array $flags ): ?string {
+        foreach ( $flags as $flag ) {
+            if ( preg_match( '/^--(all-tables(-with-prefix)?|network)(=|$)/i', (string) $flag ) ) {
+                return 'the all-tables and network flags reach the options table.';
+            }
+        }
+        if ( [] === $tables ) {
+            return 'without a table list it rewrites every core table, options included. Name the tables.';
+        }
+        foreach ( $tables as $table ) {
+            $name = strtolower( (string) $table );
+            if ( ! preg_match( '/^[a-z0-9_$]+$/', $name ) ) {
+                return "table '{$table}' must be a plain table name (no wildcards).";
+            }
+            if ( str_contains( $name, 'cowboy_mcp' ) || preg_match( '/(options|users|usermeta|sitemeta|site|blogs|blogmeta)$/', $name ) ) {
+                return "table '{$table}' holds options, users or network data.";
+            }
+        }
+        return null;
+    }
+
     /* ── WP-CLI command gating ─────────────────────────────── */
 
     /**
@@ -464,8 +654,12 @@ class Cowboy_MCP_Security {
             // active_plugins…) stay readable.
             foreach ( array_slice( $words, 2 ) as $w ) {
                 $name = strtolower( $w );
+                // Secret-bearing settings blobs too: shell output cannot be redacted
+                // (wordpress://options/{name} returns them with the secrets masked).
                 if ( self::is_hard_protected_option( $name )
-                    || preg_match( '/secret|token|api_key|_key$|_salt$|password|nonce|^woocommerce_.+_settings$/', $name ) ) {
+                    || preg_match( self::SECRET_OPTION_NAMES, $name )
+                    || preg_match( self::SECRET_BEARING_OPTIONS, $name )
+                    || preg_match( '/^woocommerce_.+_settings$/', $name ) ) {
                     return "Option {$w} holds a credential or Cowboy MCP internals.";
                 }
             }
@@ -477,6 +671,7 @@ class Cowboy_MCP_Security {
                 $re = '/^' . strtr( preg_quote( strtolower( $w ), '/' ), [ '\\*' => '.*', '%' => '.*', '\\?' => '.' ] ) . '$/';
                 foreach ( [ 'cowboy_mcp_new_key_1', '_transient_cowboy_mcp_oauth_reg_open' ] as $ours ) {
                     if ( str_starts_with( strtolower( $w ), 'cowboy_mcp_' ) || preg_match( '/^(_site)?_transient_(timeout_)?cowboy_mcp_/i', $w )
+                        || ! self::is_plain_name( $w )
                         || ( strpbrk( $w, '*%?' ) && preg_match( $re, $ours ) ) ) {
                         return "Transient {$w} belongs to Cowboy MCP (sign-in codes, one-time keys).";
                     }
@@ -753,15 +948,40 @@ class Cowboy_MCP_Security {
         if ( 'option' === $noun || 'transient' === $noun ) {
             $verb           = isset( $positionals[1] ) ? strtolower( $positionals[1] ) : '';
             $name           = isset( $positionals[2] ) ? strtolower( $positionals[2] ) : '';
-            $own            = str_starts_with( $name, 'cowboy_mcp_' ) || (bool) preg_match( '/^(_site)?_transient_(timeout_)?cowboy_mcp_/', $name );
+            // A non-ASCII name can collate onto one of ours (see is_plain_name()).
+            $own            = str_starts_with( $name, 'cowboy_mcp_' ) || (bool) preg_match( '/^(_site)?_transient_(timeout_)?cowboy_mcp_/', $name )
+                || ( '' !== $name && ! self::is_plain_name( $name ) );
             $is_write_verb  = in_array( $verb, [ 'update', 'delete', 'add', 'set' ], true ) && $own;
-            $is_patch_touch = 'option' === $noun && $verb === 'patch' && self::cli_tokens_contain( $t['tokens'], 'cowboy_mcp_' );
+            // `option patch <action> <name> …` carries the name one slot later.
+            $patch_name     = isset( $positionals[3] ) ? (string) $positionals[3] : '';
+            $is_patch_touch = 'option' === $noun && $verb === 'patch'
+                && ( self::cli_tokens_contain( $t['tokens'], 'cowboy_mcp_' ) || ( '' !== $patch_name && ! self::is_plain_name( $patch_name ) ) );
             if ( $is_write_verb || $is_patch_touch ) {
                 return [
                     'blocked' => true,
                     'code'    => 'blocked',
                     'message' => 'WP-CLI writes to the plugin\'s own cowboy_mcp_ options are blocked for safety and cannot be lifted by Power mode.',
                 ];
+            }
+        }
+
+        // 2d. With a persistent object cache, get_option() reads the cache first, so a
+        //     cache write to the options groups is an option write. Same footing as
+        //     step 2 (never lifted).
+        if ( 'cache' === $noun ) {
+            $cverb = isset( $positionals[1] ) ? strtolower( $positionals[1] ) : '';
+            if ( in_array( $cverb, [ 'set', 'add', 'replace', 'patch', 'incr', 'decr' ], true ) ) {
+                foreach ( array_slice( $t['tokens'], 2 ) as $tok ) {
+                    $w = strtolower( (string) $tok );
+                    if ( in_array( $w, [ 'options', 'site-options', 'alloptions', 'notoptions' ], true )
+                        || str_contains( $w, 'cowboy_mcp' ) || ! self::is_plain_name( $w ) ) {
+                        return [
+                            'blocked' => true,
+                            'code'    => 'blocked',
+                            'message' => 'WP-CLI cache writes to the options cache are blocked: they change what get_option() returns.',
+                        ];
+                    }
+                }
             }
         }
 
@@ -879,6 +1099,16 @@ class Cowboy_MCP_Security {
                     'message' => 'Malformed db query/search command: could not safely evaluate the SQL payload.',
                 ];
             }
+            // Without Power mode the escape hatch reads only. Recognising protected
+            // option names inside free-form SQL is not reliable, and a write here would
+            // reach cowboy_mcp_settings (the bootstrap invariant) and credential rows.
+            if ( ! $power_mode && 'query' === strtolower( $positionals[1] ) && ! self::sql_is_single_read( $sql ) ) {
+                return [
+                    'blocked' => true,
+                    'code'    => 'blocked',
+                    'message' => 'Without Power mode, db query runs a single read statement only (SELECT, SHOW, DESCRIBE, EXPLAIN). Use the dedicated tools to change data.',
+                ];
+            }
             $why = self::sql_blocked_reason( $sql );
             if ( $why && ! $power_mode ) {
                 return [ 'blocked' => true, 'code' => 'blocked', 'message' => "SQL operation blocked: {$why}." ];
@@ -886,6 +1116,17 @@ class Cowboy_MCP_Security {
             // Credential/secret access is never lifted, even in Power mode.
             if ( self::sql_touches_secret( $sql ) ) {
                 return [ 'blocked' => true, 'code' => 'blocked', 'message' => 'Query references credential/secret data and is blocked.' ];
+            }
+        }
+
+        // 4b. search-replace rewrites whole tables, options included. Without Power
+        //     mode it must name its tables, and none may hold options, users, user
+        //     meta or network data (or be one of ours); wildcards and the
+        //     all-tables/network flags are refused.
+        if ( ! $power_mode && 'search-replace' === $noun ) {
+            $why = self::cli_search_replace_reason( array_slice( $positionals, 3 ), $t['flags'] );
+            if ( null !== $why ) {
+                return [ 'blocked' => true, 'code' => 'blocked', 'message' => "search-replace blocked: {$why} An administrator can enable Power mode to allow this; wp_search_replace covers post content." ];
             }
         }
 
@@ -922,7 +1163,7 @@ class Cowboy_MCP_Security {
     }
 
     /** wp-config constants whose exact values are redacted from WP-CLI output. */
-    private const SECRET_CONSTANTS = [ 'DB_PASSWORD', 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT' ];
+    private const SECRET_CONSTANTS = [ 'DB_PASSWORD', 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT', 'WP_SECRETS_KEY', 'WP_SECRETS_KEY_PREVIOUS' ];
 
     /**
      * Backstop for wp_cli output: redact what the gate cannot predict from the
@@ -966,9 +1207,10 @@ class Cowboy_MCP_Security {
      * (all A + AAAA records) must be public. Rejects private, reserved, loopback,
      * link-local (cloud metadata 169.254.0.0/16) and unique-local addresses.
      *
+     * @param bool $always Keep the address check on in Power mode (chat file links).
      * @return bool|WP_Error
      */
-    public static function validate_url_ssrf( string $url ): bool|WP_Error {
+    public static function validate_url_ssrf( string $url, bool $always = false ): bool|WP_Error {
         $scheme = wp_parse_url( $url, PHP_URL_SCHEME );
         if ( ! in_array( $scheme, [ 'http', 'https' ], true ) ) {
             return new WP_Error( 'invalid_scheme', 'Only http and https URLs are allowed.' );
@@ -977,7 +1219,7 @@ class Cowboy_MCP_Security {
         // Power mode lifts the private/reserved-IP rejection. Scheme validation (above)
         // still applies; the transport is also switched to the unguarded variant at the
         // call sites so WordPress does not re-block the request.
-        if ( self::power_mode_enabled() ) {
+        if ( ! $always && self::power_mode_enabled() ) {
             return true;
         }
 

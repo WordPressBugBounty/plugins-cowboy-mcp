@@ -12,6 +12,142 @@ function cowboy_mcp_acf_normalize_object_id( string $id ) {
 }
 
 /**
+ * Refuse ACF value writes that land on storage the other tools protect.
+ *
+ * ACF stores a value under the field's NAME whether or not the field is registered,
+ * so the name is judged as the raw meta key / option name it becomes:
+ *  - options pages and any unrecognised string object id write option `{id}_{name}`
+ *    → the option write gate (hard-protected never, the soft list only in Power mode);
+ *  - users → no role/capability/level keys and nothing is_blocked_meta_key() refuses;
+ *  - posts, terms, comments → is_blocked_meta_key().
+ * Next to every value ACF also writes a hidden reference — option `_{id}_{name}`, meta
+ * `_{name}` — holding the field key, or '' for a name it does not know (ACF 6.8.10).
+ * That row is judged too: the option twin through the same option gate, and on any
+ * target an existing twin must already be an ACF reference, never someone else's row
+ * (a field named `price` would otherwise blank a product's `_price`).
+ */
+function cowboy_mcp_acf_write_gate( string $field_name, $object_id ): ?WP_Error {
+    $name = $field_name;
+    if ( function_exists( 'acf_get_field' ) ) {
+        $field = acf_get_field( $field_name );
+        if ( is_array( $field ) && ! empty( $field['name'] ) ) {
+            $name = (string) $field['name'];
+        }
+    }
+
+    if ( function_exists( 'acf_decode_post_id' ) ) {
+        $decoded = acf_decode_post_id( $object_id );
+        $type    = (string) ( $decoded['type'] ?? 'post' );
+        $id      = $decoded['id'] ?? $object_id;
+    } else {
+        $type = is_int( $object_id ) ? 'post' : 'option';
+        $id   = $object_id;
+        if ( is_string( $object_id ) && preg_match( '/^(user|term|comment)_(\d+)$/', $object_id, $m ) ) {
+            $type = $m[1];
+            $id   = (int) $m[2];
+        }
+    }
+
+    if ( 'option' === $type ) {
+        $option = $id . '_' . $name;
+        $twin   = '_' . $option;
+        foreach ( [ $option, $twin ] as $target ) {
+            $block = Cowboy_MCP_Security::option_write_block( $target );
+            if ( 'invalid' === $block || 'hard' === $block
+                || ( 'soft' === $block && ! Cowboy_MCP_Security::power_mode_enabled() ) ) {
+                return new WP_Error( 'protected_option', $target === $twin
+                    ? "This ACF value would also write its hidden reference to the protected option '{$twin}'."
+                    : "This ACF value would be stored in the protected option '{$option}'." );
+            }
+        }
+        foreach ( cowboy_mcp_acf_stored_rows( 'option', 0, $twin ) as $row ) {
+            if ( ! cowboy_mcp_acf_is_field_ref( $row[1] ) ) {
+                return cowboy_mcp_acf_reference_collision( $twin );
+            }
+        }
+        return null;
+    }
+
+    // The meta tables compare keys like the options table (case/accent/width-insensitive,
+    // PAD SPACE), so the name is judged trimmed and as every stored key it binds to.
+    if ( ! Cowboy_MCP_Security::is_plain_name( $name ) ) {
+        return new WP_Error( 'protected_meta', "Field name '{$name}' must be plain printable ASCII." );
+    }
+    $meta_id = in_array( $type, [ 'post', 'term', 'user', 'comment' ], true ) && is_numeric( $id ) ? (int) $id : 0;
+    $keys    = [ trim( $name ) ];
+    if ( $meta_id ) {
+        $keys = array_unique( array_merge( $keys, array_column( cowboy_mcp_acf_stored_rows( $type, $meta_id, $name ), 0 ) ) );
+    }
+    foreach ( $keys as $key ) {
+        if ( Cowboy_MCP_Security::is_blocked_meta_key( $key ) ) {
+            return new WP_Error( 'protected_meta', "Field name '{$name}' maps to a protected meta key." );
+        }
+        if ( 'user' === $type && preg_match( '/(capabilities|user_level)$/i', $key ) ) {
+            return new WP_Error( 'protected_meta', "Field name '{$name}' maps to a user's role or capability meta; use wp_update_user to change roles." );
+        }
+    }
+    // Not is_blocked_meta_key() on the twin: every `_{name}` starts with `_`. Every row
+    // it binds to must already be an ACF reference (update_metadata() rewrites them all).
+    $twin = '_' . trim( $name );
+    if ( $meta_id ) {
+        foreach ( cowboy_mcp_acf_stored_rows( $type, $meta_id, $twin ) as $row ) {
+            if ( ! cowboy_mcp_acf_is_field_ref( $row[1] ) ) {
+                return cowboy_mcp_acf_reference_collision( $twin );
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * The rows a write to $key binds to, as [ stored key, raw value ] pairs: option rows,
+ * or one object's meta rows. Read from the table, never a cache — the collation decides
+ * which rows `= %s` matches (see Cowboy_MCP_Security::stored_option_names()).
+ */
+function cowboy_mcp_acf_stored_rows( string $type, int $id, string $key ): array {
+    global $wpdb;
+    if ( 'option' === $type ) {
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, PluginCheck.Security.DirectDB.UnescapedDBParameter -- collation probe; must hit the table, never the options cache.
+        return (array) $wpdb->get_results( $wpdb->prepare( "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name = %s", $key ), ARRAY_N );
+    }
+    $table = _get_meta_table( $type );
+    if ( ! $table ) {
+        return [];
+    }
+    $column = sanitize_key( $type . '_id' );
+    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- collation probe; table and column come from _get_meta_table() / the decoded ACF type.
+    return (array) $wpdb->get_results( $wpdb->prepare( "SELECT meta_key, meta_value FROM {$table} WHERE {$column} = %d AND meta_key = %s", $id, $key ), ARRAY_N );
+}
+
+/**
+ * The write gate for the five ACF write tools, run before the dry-run / safe-mode
+ * previews (PRE_DISPATCH) so a preview refuses what the handler refuses. Args unchanged.
+ */
+function cowboy_mcp_acf_check_args( array $a ): array|WP_Error {
+    $field_name = $a['field_name'] ?? '';
+    if ( ! is_string( $field_name ) || '' === $field_name ) {
+        return $a; // the handler reports the missing field_name
+    }
+    $gate = cowboy_mcp_acf_write_gate( $field_name, cowboy_mcp_acf_normalize_object_id( (string) ( $a['object_id'] ?? '' ) ) );
+    return $gate ?? $a;
+}
+
+/** Whether a stored hidden-reference value is ACF's own: '' or a field key (ACF's own test). */
+function cowboy_mcp_acf_is_field_ref( $value ): bool {
+    if ( '' === $value ) {
+        return true;
+    }
+    if ( ! is_string( $value ) ) {
+        return false;
+    }
+    return function_exists( 'acf_is_field_key' ) ? (bool) acf_is_field_key( $value ) : str_starts_with( $value, 'field_' );
+}
+
+function cowboy_mcp_acf_reference_collision( string $twin ): WP_Error {
+    return new WP_Error( 'acf_reference_collision', "ACF stores a hidden reference '{$twin}' next to this value, and that row already holds other data on this object. Use a different field name." );
+}
+
+/**
  * Recursively format a field definition for schema discovery.
  *
  * Expands sub_fields (repeater/group) and layouts (flexible content)
@@ -299,6 +435,10 @@ return [
             if ( $field_name === '' ) {
                 return new WP_Error( 'missing_param', 'field_name is required.' );
             }
+            $gate = cowboy_mcp_acf_write_gate( $field_name, $object_id );
+            if ( $gate ) {
+                return $gate;
+            }
             if ( ! array_key_exists( 'value', $a ) ) {
                 return new WP_Error( 'missing_param', 'value is required.' );
             }
@@ -322,6 +462,10 @@ return [
 
             if ( $field_name === '' ) {
                 return new WP_Error( 'missing_param', 'field_name is required.' );
+            }
+            $gate = cowboy_mcp_acf_write_gate( $field_name, $object_id );
+            if ( $gate ) {
+                return $gate;
             }
 
             $result = delete_field( $field_name, $object_id );
@@ -347,6 +491,10 @@ return [
             if ( $field_name === '' ) {
                 return new WP_Error( 'missing_param', 'field_name is required.' );
             }
+            $gate = cowboy_mcp_acf_write_gate( $field_name, $object_id );
+            if ( $gate ) {
+                return $gate;
+            }
 
             $row_number = add_row( $field_name, $value, $object_id );
 
@@ -370,6 +518,10 @@ return [
 
             if ( $field_name === '' ) {
                 return new WP_Error( 'missing_param', 'field_name is required.' );
+            }
+            $gate = cowboy_mcp_acf_write_gate( $field_name, $object_id );
+            if ( $gate ) {
+                return $gate;
             }
             if ( $row_number < 1 ) {
                 return new WP_Error( 'invalid_param', 'row_number must be >= 1.' );
@@ -396,6 +548,10 @@ return [
 
             if ( $field_name === '' ) {
                 return new WP_Error( 'missing_param', 'field_name is required.' );
+            }
+            $gate = cowboy_mcp_acf_write_gate( $field_name, $object_id );
+            if ( $gate ) {
+                return $gate;
             }
             if ( $row_number < 1 ) {
                 return new WP_Error( 'invalid_param', 'row_number must be >= 1.' );

@@ -77,6 +77,21 @@ class Cowboy_MCP_Tools {
         'events/tools-events.php',
     ];
 
+    /**
+     * Argument checks call_tool() runs before the dry-run and safe-mode intercepts,
+     * which bypass the handler: tool => function( array $args ): array|WP_Error.
+     * The handlers call the same functions again.
+     */
+    private const PRE_DISPATCH = [
+        'wp_search_replace'   => 'cowboy_mcp_search_replace_normalize_args',
+        'wp_upload_media'     => 'cowboy_mcp_media_check_args',
+        'wp_acf_update_field' => 'cowboy_mcp_acf_check_args',
+        'wp_acf_delete_field' => 'cowboy_mcp_acf_check_args',
+        'wp_acf_add_row'      => 'cowboy_mcp_acf_check_args',
+        'wp_acf_update_row'   => 'cowboy_mcp_acf_check_args',
+        'wp_acf_delete_row'   => 'cowboy_mcp_acf_check_args',
+    ];
+
     /** Map from domain file path to category name. */
     private const CATEGORY_MAP = [
         'core/options.php'            => 'options',
@@ -236,10 +251,24 @@ class Cowboy_MCP_Tools {
             if ( $inner_tool === 'cowboy_run' || $inner_tool === 'cowboy_discover' ) {
                 return new WP_Error( 'invalid_params', 'Cannot invoke gateway meta-tools through cowboy_run.', [ 'code' => -32602 ] );
             }
+            $inner_args = $args['arguments'] ?? [];
+            // ChatGPT fills `openai/fileParams` only on top-level inputs of a listed tool,
+            // so a file attached in the chat arrives on cowboy_run itself. Hand it to an
+            // inner tool that takes a `file` input (wp_upload_media).
+            if ( isset( $args['file'] ) && '' !== $args['file'] ) {
+                if ( ! isset( self::$tool_map[ $inner_tool ]['inputSchema']['properties']['file'] ) ) {
+                    return new WP_Error( 'invalid_params', "The file input is only accepted with tool=wp_upload_media, not {$inner_tool}.", [ 'code' => -32602 ] );
+                }
+                $inner_args         = is_array( $inner_args ) ? $inner_args : [];
+                $inner_args['file'] = $args['file'];
+                if ( 'wp_upload_media' === $inner_tool && empty( $inner_args['source_type'] ) ) {
+                    $inner_args['source_type'] = 'file';
+                }
+            }
             $log_id = self::mcp_log( 'tool_call', [ 'tool' => 'cowboy_run', 'inner_tool' => $inner_tool ] );
             $result = self::call_tool( [
                 'name'      => $inner_tool,
-                'arguments' => $args['arguments'] ?? [],
+                'arguments' => $inner_args,
             ] );
             Cowboy_MCP_Audit_Log::set_result( $log_id, self::result_status( $result ) );
             return $result;
@@ -330,11 +359,19 @@ class Cowboy_MCP_Tools {
         }
 
         // The dry-run and safe-mode previews bypass the handler's validation.
-        if ( $name === 'wp_search_replace' && function_exists( 'cowboy_mcp_search_replace_normalize_args' ) ) {
-            $args = cowboy_mcp_search_replace_normalize_args( $args );
-            if ( is_wp_error( $args ) ) {
-                return $args;
+        // A refusal is a tool error, audited like one from the handler; one that names a
+        // JSON-RPC code (wp_search_replace: -32602) stays a protocol error.
+        $pre = self::PRE_DISPATCH[ $name ] ?? null;
+        if ( $pre && function_exists( $pre ) ) {
+            $checked = $pre( $args );
+            if ( is_wp_error( $checked ) ) {
+                if ( isset( $checked->get_error_data()['code'] ) ) {
+                    return $checked;
+                }
+                $log_id = self::mcp_log( 'tool_call', [ 'tool' => $name, 'args' => $args, 'power_mode' => Cowboy_MCP_Security::power_mode_enabled() ] );
+                return self::tool_error_result( $name, $checked, $log_id );
             }
+            $args = $checked;
         }
 
         // Dry-run intercept: preview what the tool would do without executing.
@@ -383,27 +420,7 @@ class Cowboy_MCP_Tools {
                 if ( $capture !== null ) {
                     Cowboy_MCP_Rollback::discard( $capture );
                 }
-                self::mcp_log( 'tool_error', [ 'tool' => $name, 'error' => $result->get_error_message() ] );
-                Cowboy_MCP_Audit_Log::set_result( $log_id, 'error' );
-
-                // Enhanced error response with suggestions.
-                $suggestion = $result->get_error_data()['suggestion']
-                              ?? self::get_error_suggestion( $name, $result->get_error_code() );
-                $text = 'Error: ' . $result->get_error_message();
-                if ( $suggestion ) {
-                    $text .= "\nSuggestion: " . $suggestion;
-                }
-
-                if ( class_exists( 'Cowboy_MCP_Transport' ) && method_exists( 'Cowboy_MCP_Transport', 'queue_notification' ) ) {
-                    Cowboy_MCP_Transport::queue_notification( 'warning', "Tool error: {$result->get_error_message()}" );
-                }
-
-                return [
-                    'content' => [
-                        [ 'type' => 'text', 'text' => $text ],
-                    ],
-                    'isError' => true,
-                ];
+                return self::tool_error_result( $name, $result, $log_id );
             }
 
             if ( $capture !== null ) {
@@ -732,6 +749,33 @@ class Cowboy_MCP_Tools {
      * ================================================================ */
 
     /**
+     * A tool's WP_Error as an MCP tool result (isError, "Error: …" + suggestion), audited.
+     */
+    private static function tool_error_result( string $name, WP_Error $error, ?int $log_id ): array {
+        self::mcp_log( 'tool_error', [ 'tool' => $name, 'error' => $error->get_error_message() ] );
+        Cowboy_MCP_Audit_Log::set_result( $log_id, 'error' );
+
+        // Enhanced error response with suggestions.
+        $suggestion = $error->get_error_data()['suggestion']
+                      ?? self::get_error_suggestion( $name, $error->get_error_code() );
+        $text = 'Error: ' . $error->get_error_message();
+        if ( $suggestion ) {
+            $text .= "\nSuggestion: " . $suggestion;
+        }
+
+        if ( class_exists( 'Cowboy_MCP_Transport' ) && method_exists( 'Cowboy_MCP_Transport', 'queue_notification' ) ) {
+            Cowboy_MCP_Transport::queue_notification( 'warning', "Tool error: {$error->get_error_message()}" );
+        }
+
+        return [
+            'content' => [
+                [ 'type' => 'text', 'text' => $text ],
+            ],
+            'isError' => true,
+        ];
+    }
+
+    /**
      * Get a contextual suggestion for an error code.
      */
     private static function get_error_suggestion( string $tool_name, string $error_code ): ?string {
@@ -795,6 +839,12 @@ class Cowboy_MCP_Tools {
                         'type'        => 'object',
                         'description' => "Tool arguments per the tool's inputSchema",
                     ],
+                    'file' => [
+                        'type'        => 'object',
+                        'description' => 'A file the user attached in the chat (ChatGPT). Only with tool="wp_upload_media"; put title, alt_text, post_id and resize options in arguments.',
+                        'properties'  => self::file_param_properties(),
+                        'required'    => [ 'download_url', 'file_id' ],
+                    ],
                 ],
                 [
                     'readOnlyHint'    => false,
@@ -802,7 +852,20 @@ class Cowboy_MCP_Tools {
                     'idempotentHint'  => false,
                     'openWorldHint'   => true,
                 ]
-            ),
+            ) + [ '_meta' => [ 'openai/fileParams' => [ 'file' ] ] ],
+        ];
+    }
+
+    /**
+     * Properties of an `openai/fileParams` file object. OpenAI's Apps SDK requires
+     * all four to be declared; ChatGPT always sends download_url and file_id.
+     */
+    public static function file_param_properties(): array {
+        return [
+            'download_url' => [ 'type' => 'string', 'description' => 'Temporary download link ChatGPT provides for the file' ],
+            'file_id'      => [ 'type' => 'string', 'description' => 'ChatGPT file id' ],
+            'mime_type'    => [ 'type' => 'string', 'description' => 'MIME type, e.g. image/png' ],
+            'file_name'    => [ 'type' => 'string', 'description' => 'Original file name' ],
         ];
     }
 
