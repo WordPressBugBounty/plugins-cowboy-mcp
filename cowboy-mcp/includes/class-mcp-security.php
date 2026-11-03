@@ -20,6 +20,12 @@ class Cowboy_MCP_Security {
         'upload_path', 'upload_url_path',
     ];
 
+    /** Cowboy's own settings and credential rows, which an option_name LIKE may not reach. */
+    private const GUARDED_OPTIONS = [
+        'cowboy_mcp_settings', 'cowboy_mcp_api_keys', 'cowboy_mcp_oauth_clients',
+        'cowboy_mcp_oauth_tokens', 'cowboy_mcp_oauth_refresh', 'cowboy_mcp_oauth_blocked',
+    ];
+
     /** Dangerous SQL operations, keyed by detection pattern. Applied to the wp_cli `db query`/`db search` escape hatch. */
     private const SQL_BLOCKED = [
         '/\bDROP\s+DATABASE\b/i'           => 'DROP DATABASE',
@@ -153,7 +159,7 @@ class Cowboy_MCP_Security {
     }
 
     /** Key parts (letters only, lower-cased) that mark a nested setting as a secret. */
-    private const SECRET_VALUE_KEY_PARTS = [ 'pass', 'pwd', 'secret', 'token', 'bearer', 'nonce', 'salt', 'licence', 'license', 'credential', 'private', 'signature' ];
+    private const SECRET_VALUE_KEY_PARTS = [ 'pass', 'pwd', 'pswd', 'secret', 'token', 'bearer', 'nonce', 'salt', 'licence', 'license', 'credential', 'private', 'signature', 'dsn', 'webhook', 'jwt', 'cookie', 'session' ];
 
     /**
      * Redact an option value for display: every nested entry whose key reads as a
@@ -178,6 +184,14 @@ class Cowboy_MCP_Security {
             return $value;
         }
         if ( is_string( $value ) ) {
+            // Settings stored as JSON text inside an option: redact the decoded tree.
+            $trim = ltrim( $value );
+            if ( '' !== $trim && ( '{' === $trim[0] || '[' === $trim[0] ) ) {
+                $decoded = json_decode( $value, true );
+                if ( is_array( $decoded ) ) {
+                    return (string) wp_json_encode( self::redact_option_value( $decoded ) );
+                }
+            }
             $value = self::scrub_secrets( $value );
             return (string) preg_replace( '/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{8,}|\bwhsec_[A-Za-z0-9]{8,}/', '[REDACTED]', $value );
         }
@@ -192,6 +206,10 @@ class Cowboy_MCP_Security {
         }
         // apikey, authkey, licensekey, consumerkey, secretkey, cfkey, …
         if ( str_ends_with( $norm, 'key' ) || str_ends_with( $norm, 'keys' ) ) {
+            return true;
+        }
+        // `auth` (not author/authority) and a standalone `pw` segment (smtp_pw, smtpPw).
+        if ( preg_match( '/auth(?!or)/', $norm ) || preg_match( '/(^|[^a-z])pw($|[^a-z])|[a-z]Pw($|[^a-z])/i', $key ) ) {
             return true;
         }
         foreach ( self::SECRET_VALUE_KEY_PARTS as $part ) {
@@ -309,7 +327,107 @@ class Cowboy_MCP_Security {
         $storage = ( realpath( $base ) ?: $base ) . '/cowboy-mcp';
         $real    = realpath( $abs_path );
         $target  = $real !== false ? $real : $abs_path;
-        return $target === $storage || str_starts_with( $target . '/', $storage . '/' );
+        return self::path_within_folded( $target, $storage ) || self::path_within_folded( $target, $base . '/cowboy-mcp' );
+    }
+
+    /**
+     * Whether $path is $dir or inside it, compared the way a case-insensitive
+     * filesystem (macOS, Windows) resolves names: separators unified, case folded.
+     * realpath() keeps the case it was given, so `MU-Plugins/x.php` reaches the
+     * real mu-plugins there. For REFUSAL checks only: on a case-sensitive host it
+     * can only over-match, never let a path through.
+     */
+    public static function path_within_folded( string $path, string $dir ): bool {
+        $norm = static fn( string $p ): string => rtrim( strtolower( str_replace( '\\', '/', $p ) ), '/' );
+        $p    = $norm( $path );
+        $d    = $norm( $dir );
+        return '' !== $d && ( $p === $d || str_starts_with( $p . '/', $d . '/' ) );
+    }
+
+    /* ── Script-capable markup ─────────────────────────────── */
+
+    /**
+     * Markup that runs script or rewrites the page when a human views it: script-ish
+     * elements, inline event handlers (also `/`-separated, `<svg/onload=…>`),
+     * script / data-HTML URLs and srcdoc / formaction attributes.
+     */
+    private const SCRIPT_CAPABLE = '#<\s*/?\s*(script|iframe|frame|frameset|object|embed|applet|style|link|meta|base|form|svg|math|template|noscript|xml|animate|set)\b|[\s"\'/]on[a-z]+\s*=|[=\s"\'(`](?:java|vb)script\s*:|data\s*:\s*text/html|\bsrcdoc\s*=|\bformaction\s*=|\bxlink:href\s*=#i';
+
+    /**
+     * How many script-capable constructs a fragment holds, counted the way a browser
+     * reads it: entities decoded (including semicolon-less numeric ones, which
+     * browsers accept and html_entity_decode() does not) and the tab / newline / NUL
+     * characters URL parsers drop removed first. Used both absolutely (agent-written
+     * strings) and comparatively (a replace may not add any to a document).
+     */
+    public static function script_capable_count( string $html ): int {
+        $text = (string) preg_replace_callback(
+            '/&#(x[0-9a-f]+|\d+);?/i',
+            static function ( array $m ): string {
+                $n = ( 'x' === strtolower( $m[1][0] ) ) ? hexdec( substr( $m[1], 1 ) ) : (int) $m[1];
+                // Every construct matched is ASCII; other code points cannot form one.
+                return ( $n > 0 && $n < 128 ) ? chr( (int) $n ) : ' ';
+            },
+            $html
+        );
+        $text = html_entity_decode( $text, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+        $text = str_replace( [ "\t", "\n", "\r", "\0" ], '', $text );
+        return max( (int) preg_match_all( self::SCRIPT_CAPABLE, $html ), (int) preg_match_all( self::SCRIPT_CAPABLE, $text ) );
+    }
+
+    /** Elements a block's `tagName` attribute must never name: tag_escape() keeps them, and they run or swallow the page. */
+    private const RAW_TEXT_TAGS = [ 'script', 'style', 'iframe', 'frame', 'frameset', 'object', 'embed', 'applet', 'template', 'noscript', 'noembed', 'noframes', 'textarea', 'title', 'xmp', 'plaintext', 'base', 'meta', 'link', 'svg', 'math', 'form' ];
+
+    /**
+     * Script-capable values inside block attributes (one parsed block's attrs).
+     * Attributes live in the block-comment JSON, which no kses pass reads, and
+     * dynamic blocks print them: string leaves are counted like markup, and a
+     * `tagName` that tag_escape() resolves to a raw-text / script element counts too.
+     */
+    public static function attrs_risk( array $attrs ): int {
+        $n = 0;
+        array_walk_recursive( $attrs, static function ( $v, $k ) use ( &$n ): void {
+            if ( ! is_string( $v ) ) {
+                return;
+            }
+            if ( 'tagName' === $k && in_array( strtolower( (string) preg_replace( '/[^a-zA-Z0-9_:-]/', '', $v ) ), self::RAW_TEXT_TAGS, true ) ) {
+                $n++;
+            }
+            $n += self::value_risk( $v, (string) $k );
+        } );
+        return $n;
+    }
+
+    /**
+     * script_capable_count() for a named setting value, plus one when a URL-type
+     * setting (`url`, `href`, `link`, `src`, `*_url`, …) holds a script URL as its whole
+     * value (`javascript:x` is a link there, but prose — "JavaScript: The Good Parts" —
+     * in a heading or text setting).
+     */
+    public static function value_risk( string $value, string $key = '' ): int {
+        $n = self::script_capable_count( $value );
+        if ( preg_match( '/(?:^|_)(?:url|href|link|src|action)$/i', $key ) ) {
+            $flat = strtolower( (string) preg_replace( '/[\x00-\x20]+/', '', html_entity_decode( $value, ENT_QUOTES | ENT_HTML5, 'UTF-8' ) ) );
+            if ( str_starts_with( $flat, 'javascript:' ) || str_starts_with( $flat, 'vbscript:' ) || str_starts_with( $flat, 'data:text/html' ) ) {
+                $n++;
+            }
+        }
+        return $n;
+    }
+
+    /** attrs_risk() summed over a parsed block tree (parse_blocks() shape). */
+    public static function blocks_attrs_risk( array $blocks ): int {
+        $n = 0;
+        foreach ( $blocks as $b ) {
+            if ( ! is_array( $b ) ) {
+                continue;
+            }
+            $n += self::attrs_risk( is_array( $b['attrs'] ?? null ) ? $b['attrs'] : [] );
+            if ( ! empty( $b['innerBlocks'] ) && is_array( $b['innerBlocks'] ) ) {
+                $n += self::blocks_attrs_risk( $b['innerBlocks'] );
+            }
+        }
+        return $n;
     }
 
     /* ── Who administers the plugin ────────────────────────── */
@@ -411,14 +529,19 @@ class Cowboy_MCP_Security {
      * practice: administrator is the only stock role holding them, and it is
      * already privileged via manage_options. (WooCommerce's shop_manager carries
      * none of them; older WC releases did, which is why this list once excluded
-     * them.)
+     * them.) The two code caps below are the exception (see there).
+     *
+     * `unfiltered_html` is script in every admin's browser (an admin session is
+     * code execution), and `create_users` hands out new accounts; on a single site
+     * the stock Editor holds the former, so Editor is privileged there. Multisite
+     * maps unfiltered_html to super admins only, so it does not count for a role.
      */
     private const PRIVILEGED_CAPS = [
         'manage_options',
         'install_plugins', 'edit_plugins', 'activate_plugins', 'update_plugins',
         'install_themes', 'edit_themes', 'update_themes',
-        'edit_files',
-        'edit_users', 'promote_users', 'delete_users',
+        'edit_files', 'unfiltered_html',
+        'edit_users', 'promote_users', 'delete_users', 'create_users',
     ];
 
     /** Whether granting this role hands over settings or code-execution control. */
@@ -428,6 +551,9 @@ class Cowboy_MCP_Security {
             return false;
         }
         foreach ( self::PRIVILEGED_CAPS as $cap ) {
+            if ( 'unfiltered_html' === $cap && is_multisite() ) {
+                continue; // map_meta_cap() keeps it from everyone but super admins
+            }
             if ( ! empty( $role_obj->capabilities[ $cap ] ) ) {
                 return true;
             }
@@ -454,24 +580,93 @@ class Cowboy_MCP_Security {
     /**
      * Normalize SQL for detection only (never for execution): strip comments and
      * collapse whitespace so blocklist regexes can't be evaded with `DROP/**​/TABLE`.
+     *
+     * Reads quotes the way MySQL does: a `#` or `--` inside a string is text, and
+     * stripping it would hide the live SQL after it. `--` opens a comment only before
+     * whitespace or the end, so `5--1 WHERE …` stays in the scanned text. MySQL EXECUTES
+     * the body of a comment opened with `/*!`, `/*!NNNNN` or MariaDB's `/*M!`, so those
+     * bodies stay too: the version number is ignored on purpose, since we do not know
+     * the server version, and scanning a body the server might skip only over-blocks,
+     * which is the safe direction. An unclosed comment stays, for the same reason.
+     *
+     * Quotes follow the default sql_mode. Under NO_BACKSLASH_ESCAPES, `\'` closes a
+     * string here read as open: text is then scanned, not hidden, except after a `#`
+     * this reading puts outside a string.
      */
     public static function normalize_sql( string $sql ): string {
-        // MySQL EXECUTES the body of `/*! ... */` and version-gated `/*!NNNNN ... */`
-        // comments, so their contents must be unwrapped into the scanned text rather
-        // than stripped — deleting them would hide live SQL from the blocklist
-        // (`/*!50000 DROP */ TABLE t` reaches the server as `DROP TABLE t`). The
-        // version number is ignored on purpose: we do not know the server version, and
-        // scanning a body the server might skip only over-blocks, which is the safe
-        // direction. Must run BEFORE the plain-comment strip below, which would
-        // otherwise swallow these too.
-        $sql = preg_replace( '#/\*!\d*\s*(.*?)\*/#s', ' $1 ', $sql );
-        // Plain block comments /* ... */ are true comments — strip them.
-        $sql = preg_replace( '#/\*.*?\*/#s', ' ', (string) $sql );
-        // Line comments -- ... and # ... to end of line.
-        $sql = preg_replace( '/(--|#)[^\r\n]*/', ' ', (string) $sql );
+        $out  = '';
+        $len  = strlen( $sql );
+        $body = false;   // Inside an executed comment, whose `*/` is dropped.
+        for ( $i = 0; $i < $len; ) {
+            $c = $sql[ $i ];
+            if ( '\'' === $c || '"' === $c || '`' === $c ) {
+                $end  = self::sql_quote_end( $sql, $i );
+                $out .= substr( $sql, $i, $end - $i );
+                $i    = $end;
+            } elseif ( '#' === $c || ( '-' === $c && '--' === substr( $sql, $i, 2 ) && ( $i + 2 >= $len || ctype_space( $sql[ $i + 2 ] ) ) ) ) {
+                $i    = $i + strcspn( $sql, "\r\n", $i );
+                $out .= ' ';
+            } elseif ( preg_match( '#\G/\*M?!\d*#', $sql, $m, 0, $i ) ) {
+                $i   += strlen( $m[0] );
+                $out .= ' ';
+                $body = true;
+            } elseif ( $body && '*/' === substr( $sql, $i, 2 ) ) {
+                $i   += 2;
+                $out .= ' ';
+                $body = false;
+            } elseif ( '/*' === substr( $sql, $i, 2 ) && false !== strpos( $sql, '*/', $i + 2 ) ) {
+                $i    = strpos( $sql, '*/', $i + 2 ) + 2;
+                $out .= ' ';
+            } else {
+                $out .= $c;
+                ++$i;
+            }
+        }
         // Collapse whitespace.
-        $sql = preg_replace( '/\s+/', ' ', (string) $sql );
-        return trim( (string) $sql );
+        return trim( (string) preg_replace( '/\s+/', ' ', $out ) );
+    }
+
+    /** The offset just past the quoted run opening at $i, or the string's end if it never closes. A doubled quote reads as two runs. */
+    private static function sql_quote_end( string $sql, int $i ): int {
+        $quote = $sql[ $i ];
+        $len   = strlen( $sql );
+        for ( ++$i; $i < $len; $i++ ) {
+            if ( '\\' === $sql[ $i ] && '`' !== $quote ) {
+                ++$i;
+            } elseif ( $quote === $sql[ $i ] ) {
+                return $i + 1;
+            }
+        }
+        return $len;
+    }
+
+    /**
+     * A (normalized) statement with each string in the given quote characters replaced
+     * by '', and those strings' contents in order.
+     *
+     * @return array{0:string,1:string[]}
+     */
+    private static function sql_blank_strings( string $normalized, string $quotes ): array {
+        $out     = '';
+        $strings = [];
+        $len     = strlen( $normalized );
+        for ( $i = 0; $i < $len; ) {
+            $c = $normalized[ $i ];
+            if ( '\'' !== $c && '"' !== $c && '`' !== $c ) {
+                $out .= $c;
+                ++$i;
+                continue;
+            }
+            $end = self::sql_quote_end( $normalized, $i );
+            if ( str_contains( $quotes, $c ) ) {
+                $out      .= "''";
+                $strings[] = substr( $normalized, $i + 1, max( 0, $end - $i - 2 ) );
+            } else {
+                $out .= substr( $normalized, $i, $end - $i );
+            }
+            $i = $end;
+        }
+        return [ $out, $strings ];
     }
 
     /**
@@ -498,6 +693,77 @@ class Cowboy_MCP_Security {
             || stripos( $normalized, 'cowboy_mcp_oauth_clients' ) !== false
             || stripos( $normalized, 'cowboy_mcp_oauth_tokens' ) !== false
             || stripos( $normalized, 'cowboy_mcp_oauth_refresh' ) !== false;
+    }
+
+    /**
+     * Whether a (normalized) statement writes the options table without naming its rows.
+     * sql_touches_secret() can only recognise a name written out, so a hex literal, an
+     * option_id or a built string would pass it. Outside reads and table maintenance, the
+     * options table takes one UPDATE or DELETE on that table alone, whose only WHERE is
+     * option_name = 'plain_name' or IN ('plain_name', ...), neither a hard-protected name,
+     * or on a DELETE, option_name LIKE a pattern that reaches none of GUARDED_OPTIONS.
+     *
+     * Strings don't count as code here, so `post_title='More options'` is no reason to
+     * refuse. Double quotes stay in the table test: under ANSI_QUOTES they name a table.
+     */
+    public static function sql_writes_unnamed_option( string $normalized ): bool {
+        if ( self::sql_is_single_read( $normalized ) ) {
+            return false;
+        }
+        [ $shape, $strings ] = self::sql_blank_strings( $normalized, "'\"" );
+        // PREPARE and EXECUTE IMMEDIATE build a statement no text check sees.
+        if ( preg_match( '/\bPREPARE\b.*\bFROM\b|\bEXECUTE\s+IMMEDIATE\b/i', $shape ) ) {
+            return true;
+        }
+        if ( ! self::sql_names_options_table( self::sql_blank_strings( $normalized, "'" )[0] )
+            || preg_match( '/^(OPTIMIZE|ANALYZE|CHECK)\s+TABLE\s+[\w`,.\s]+;?$/i', $shape ) ) {
+            return false;
+        }
+        $where = '/^(?:UPDATE\s+`?\w*options`?\s+SET\s[^;]*|DELETE\s+FROM\s+`?\w*options`?\s+)\bWHERE\s+`?option_name`?\s*(?:=\s*(\'\')|IN\s*\(\s*(\'\'(?:\s*,\s*\'\')*)\s*\)|LIKE\s+(\'\'))\s*;?$/i';
+        if ( ! preg_match( $where, $shape, $m ) || 1 !== preg_match_all( '/\bWHERE\b/i', $shape )
+            || preg_match( '/\bSET\b.*\boption_name\b.*\bWHERE\b/i', $shape ) ) {
+            return true;
+        }
+        if ( isset( $m[3] ) ) {
+            return ! str_starts_with( strtoupper( $shape ), 'DELETE' ) || self::like_reaches_guarded_option( (string) end( $strings ) );
+        }
+        foreach ( array_slice( $strings, -substr_count( $m[1] . ( $m[2] ?? '' ), "''" ) ) as $name ) {
+            if ( ! preg_match( '/^[\w.\-]+$/D', $name ) || self::is_hard_protected_option( $name ) ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether SQL names a real options table of this site or its network, however it is
+     * quoted, qualified or cased: a plugin's `wp_gf_addon_options` or a column called
+     * `options` is not one. Whole names only, so anything around them is no way past.
+     */
+    private static function sql_names_options_table( string $sql ): bool {
+        global $wpdb;
+        $names = preg_quote( $wpdb->options, '/' );
+        if ( is_multisite() ) {
+            $names .= '|' . preg_quote( $wpdb->base_prefix, '/' ) . '(?:\d+_)?options';
+        }
+        return 1 === preg_match( '/(?<![\w$])(?:' . $names . ')(?![\w$])/i', $sql );
+    }
+
+    /** Whether a LIKE pattern could match one of GUARDED_OPTIONS, or is more than plain characters and wildcards. */
+    private static function like_reaches_guarded_option( string $pattern ): bool {
+        if ( ! preg_match( '/^[\w.\-%\\\\]+$/D', $pattern ) ) {
+            return true;
+        }
+        $regex = '';
+        foreach ( preg_split( '/(\\\\.|%|_)/s', $pattern, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY ) ?: [] as $part ) {
+            $regex .= match ( true ) {
+                '%' === $part  => '.*',
+                '_' === $part  => '.',
+                '\\' === $part[0] && strlen( $part ) > 1 => preg_quote( substr( $part, 1 ), '/' ),
+                default        => preg_quote( $part, '/' ),
+            };
+        }
+        return [] !== preg_grep( '/^' . $regex . '$/i', self::GUARDED_OPTIONS );
     }
 
     /**
@@ -536,6 +802,50 @@ class Cowboy_MCP_Security {
             }
             if ( str_contains( $name, 'cowboy_mcp' ) || preg_match( '/(options|users|usermeta|sitemeta|site|blogs|blogmeta)$/', $name ) ) {
                 return "table '{$table}' holds options, users or network data.";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether a (normalized) read query reaches option, user-meta or network-meta
+     * values: it names such a table AND the value column, or selects `*` / `t.*`.
+     * `COUNT(*)` is not a star select. Over-matching (a column merely called
+     * `options`, a multiplication) only refuses, which is the safe direction.
+     */
+    public static function sql_reads_option_values( string $normalized ): bool {
+        if ( ! preg_match( '/(options|sitemeta|usermeta)\b/i', $normalized ) ) {
+            return false;
+        }
+        if ( preg_match( '/\b(option_value|meta_value)\b/i', $normalized ) ) {
+            return true;
+        }
+        $no_count = (string) preg_replace( '/\(\s*\*\s*\)/', '()', $normalized );
+        return str_contains( $no_count, '*' );
+    }
+
+    /**
+     * Why a `db` command's flags may not run, or null. mysql accepts any
+     * unambiguous prefix of a long option and the loose-/maximum- prefixes, so
+     * names are matched as prefixes after those are removed. `--defaults` and
+     * `--no-defaults` are WP-CLI's own flags. Pure.
+     *
+     * @param string[] $flags Flag tokens.
+     */
+    public static function cli_db_flag_reason( array $flags ): ?string {
+        $risky = [ 'execute', 'init-command', 'defaults-file', 'defaults-extra-file', 'defaults-group-suffix', 'login-path', 'plugin-dir', 'local-infile', 'load-data-local-dir' ];
+        foreach ( $flags as $flag ) {
+            $name = strtolower( str_replace( '_', '-', (string) substr( (string) strstr( $flag . '=', '=', true ), 2 ) ) );
+            while ( preg_match( '/^(loose|maximum)-(.+)$/', $name, $m ) ) {
+                $name = $m[2];
+            }
+            if ( '' === $name || 'defaults' === $name || 'no-defaults' === $name ) {
+                continue;
+            }
+            foreach ( $risky as $option ) {
+                if ( str_starts_with( $option, $name ) ) {
+                    return "the mysql option --{$option} runs SQL or loads an option file outside these checks.";
+                }
             }
         }
         return null;
@@ -699,32 +1009,34 @@ class Cowboy_MCP_Security {
      * Handles single quotes (literal, no escapes inside), double quotes
      * (backslash escapes \, ", $, ` inside), backslash escapes outside quotes,
      * and adjacent-token concatenation (`ev'al'`, `"ev"al` both tokenize to
-     * "eval"). It does not perform variable/command substitution — this is a
-     * detection aid, never used to build the string that gets executed.
+     * "eval"). It does not perform variable/command substitution. The wp_cli
+     * handler executes exactly these tokens (each escapeshellarg()'d — see
+     * cli_shell_command()), so what the gates judge is what runs.
      *
-     * @return array{tokens:string[],positionals:string[],flags:string[]}
+     * Flags are classified the way WP-CLI's Configurator::extract_assoc() does
+     * AFTER the shell has removed the quotes: a token is a flag when it starts
+     * with `--` and one more character that is not `=`, however it was quoted
+     * (`'--require=x'` is the flag --require to WP-CLI). Everything else,
+     * including a lone `--`, `--=x` and single-dash tokens, is positional.
+     *
+     * @return array{tokens:string[],positionals:string[],flags:string[],unterminated:bool}
      */
     public static function cli_tokens( string $command ): array {
         $tokens       = [];
-        $bare_leading = []; // parallel to $tokens: was token[$i]'s first char typed bare (unquoted/unescaped)?
         $current      = '';
         $in_token     = false;
-        // Nullable: unset until the current token's first character is appended,
-        // then locked true (bare) or false (from a quote/escape) for that token.
-        $leading_literal = null;
-        $len             = strlen( $command );
-        $i               = 0;
+        $unterminated = false;
+        $len          = strlen( $command );
+        $i            = 0;
 
         while ( $i < $len ) {
             $c = $command[ $i ];
 
             if ( $c === ' ' || $c === "\t" || $c === "\n" || $c === "\r" ) {
                 if ( $in_token ) {
-                    $tokens[]        = $current;
-                    $bare_leading[]  = $leading_literal === true;
-                    $current         = '';
-                    $in_token        = false;
-                    $leading_literal = null;
+                    $tokens[] = $current;
+                    $current  = '';
+                    $in_token = false;
                 }
                 $i++;
                 continue;
@@ -735,11 +1047,11 @@ class Cowboy_MCP_Security {
                 $in_token = true;
                 $i++;
                 while ( $i < $len && $command[ $i ] !== "'" ) {
-                    if ( $current === '' && null === $leading_literal ) {
-                        $leading_literal = false; // first char came from inside quotes
-                    }
                     $current .= $command[ $i ];
                     $i++;
+                }
+                if ( $i >= $len ) {
+                    $unterminated = true;
                 }
                 $i++; // consume the closing quote (or run off the end if unterminated)
                 continue;
@@ -750,9 +1062,6 @@ class Cowboy_MCP_Security {
                 $in_token = true;
                 $i++;
                 while ( $i < $len && $command[ $i ] !== '"' ) {
-                    if ( $current === '' && null === $leading_literal ) {
-                        $leading_literal = false; // first char came from inside quotes
-                    }
                     if ( $command[ $i ] === '\\' && $i + 1 < $len
                         && in_array( $command[ $i + 1 ], [ '"', '\\', '$', '`' ], true ) ) {
                         $current .= $command[ $i + 1 ];
@@ -762,18 +1071,16 @@ class Cowboy_MCP_Security {
                         $i++;
                     }
                 }
+                if ( $i >= $len ) {
+                    $unterminated = true;
+                }
                 $i++; // consume the closing quote
                 continue;
             }
 
             if ( $c === '\\' ) {
-                // Outside quotes: backslash escapes the very next character. Treated the
-                // same as a quote for provenance purposes — explicit escaping is the same
-                // "make this literal data" signal as wrapping it in quotes.
+                // Outside quotes: backslash escapes the very next character.
                 $in_token = true;
-                if ( $current === '' && null === $leading_literal ) {
-                    $leading_literal = false;
-                }
                 if ( $i + 1 < $len ) {
                     $current .= $command[ $i + 1 ];
                     $i       += 2;
@@ -783,44 +1090,46 @@ class Cowboy_MCP_Security {
                 continue;
             }
 
-            if ( $current === '' && null === $leading_literal ) {
-                $leading_literal = true; // first char was typed bare, outside any quote/escape
-            }
             $in_token = true;
             $current .= $c;
             $i++;
         }
         if ( $in_token ) {
-            $tokens[]       = $current;
-            $bare_leading[] = $leading_literal === true;
+            $tokens[] = $current;
         }
 
-        // A token is only flag-eligible when its FIRST character was typed bare —
-        // i.e. genuinely outside any quoting/escaping, exactly as a real `-`/`--`
-        // CLI flag is typed. This is deliberately narrower than "the whole token
-        // is unquoted": `--'require'=x` still counts (the leading -- is bare, only
-        // the flag NAME is quoted) so quoted-flag obfuscation still gets caught.
-        // But a whole-token-quoted SQL payload like `"-1 or ...=cowboy_mcp_api_keys"`
-        // does NOT count — its leading '-' came from inside the quotes, so treating
-        // it as a flag (and dropping it from $positionals) would make the wp_cli
-        // guards see LESS of the command than WP-CLI itself executes: WP-CLI does
-        // not flag-classify a quoted positional argument just because the string it
-        // resolves to happens to start with '-'. Without this distinction,
-        // `db query "-1 or option_name='cowboy_mcp_api_keys'"` would have its entire
-        // SQL payload silently dropped from $positionals before the SQL guard ever
-        // saw it — a real regression a blanket `str_starts_with($token,'-')` rule
-        // introduced.
         $positionals = [];
         $flags       = [];
-        foreach ( $tokens as $idx => $token ) {
-            if ( str_starts_with( $token, '-' ) && ( $bare_leading[ $idx ] ?? false ) ) {
+        foreach ( $tokens as $token ) {
+            if ( self::cli_is_flag( $token ) ) {
                 $flags[] = $token;
             } else {
                 $positionals[] = $token;
             }
         }
 
-        return [ 'tokens' => $tokens, 'positionals' => $positionals, 'flags' => $flags ];
+        return [ 'tokens' => $tokens, 'positionals' => $positionals, 'flags' => $flags, 'unterminated' => $unterminated ];
+    }
+
+    /** Whether WP-CLI reads an argv word as an associative (--flag) argument. Mirrors Configurator::extract_assoc(). */
+    public static function cli_is_flag( string $token ): bool {
+        return (bool) preg_match( '/^--[^=]/', $token );
+    }
+
+    /**
+     * The shell command line for a gated WP-CLI call: `wp` plus every token
+     * cli_tokens() produced, each escapeshellarg()'d, so the shell hands WP-CLI
+     * exactly the words the gates judged (no line continuations, no globbing,
+     * no expansion). `--path` is appended unless the caller passed one (Power
+     * mode only; the gate refuses it otherwise).
+     */
+    public static function cli_shell_command( string $command, string $wp_path ): string {
+        $t     = self::cli_tokens( $command );
+        $words = array_map( 'escapeshellarg', $t['tokens'] );
+        if ( ! preg_grep( '/^--path(=|$)/i', $t['flags'] ) ) {
+            $words[] = escapeshellarg( '--path=' . $wp_path );
+        }
+        return 'wp ' . implode( ' ', $words ) . ' --allow-root 2>&1';
     }
 
     /**
@@ -878,8 +1187,27 @@ class Cowboy_MCP_Security {
     public static function wp_cli_gate( string $command, bool $power_mode, bool $safe_mode, bool $confirm ): array {
         $clear = [ 'blocked' => false, 'code' => null, 'message' => null ];
 
+        // 00. Control characters (NUL, ESC, vertical tab, …) and unbalanced quotes
+        //     have no legitimate use here and are where shells and tokenizers
+        //     disagree. Never lifted: every check below relies on reading the
+        //     command exactly as WP-CLI will. Tab, CR and LF are ordinary
+        //     whitespace to cli_tokens() and inside quotes (multi-line SQL).
+        if ( preg_match( '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', $command ) ) {
+            return [
+                'blocked' => true,
+                'code'    => 'blocked',
+                'message' => 'The command contains control characters.',
+            ];
+        }
         $t           = self::cli_tokens( $command );
         $positionals = $t['positionals'];
+        if ( $t['unterminated'] ) {
+            return [
+                'blocked' => true,
+                'code'    => 'blocked',
+                'message' => 'The command has an unterminated quote.',
+            ];
+        }
 
         // 0. WP-CLI's alias resolver CONSUMES a leading @alias token before command
         //    resolution (`wp @prod option get x` runs `option get x` against whatever
@@ -907,14 +1235,11 @@ class Cowboy_MCP_Security {
         //     registered wp command"). Both this and the @alias check above exist
         //     because a leading token WP-CLI would never resolve as a command only
         //     ever shifts our positional anchors — it can't run anything legitimate,
-        //     so rejecting it loses nothing. This one matters because the
-        //     quoting-provenance fix (see cli_tokens()) correctly stopped
-        //     flag-classifying a QUOTED leading `'--'`/`'-'` — which is right for SQL
-        //     payloads like `db query "-1 or ..."`, but means a quoted `'--'` used AS
-        //     positionals[0] now lands as an ordinary positional instead of being
-        //     dropped, silently shifting the option guard / blocked-paths anchors by
-        //     one slot (e.g. `'--' option update cowboy_mcp_settings x`). Unconditional
-        //     — never lifted by Power mode — for the same reason as the @alias check.
+        //     so rejecting it loses nothing. A lone `--` and single-dash words are
+        //     positionals to WP-CLI (see cli_tokens()), so without this they would
+        //     shift the option guard / blocked-paths anchors by one slot (e.g.
+        //     `-- option update cowboy_mcp_settings x`). Unconditional — never lifted
+        //     by Power mode — for the same reason as the @alias check.
         if ( isset( $positionals[0] ) && str_starts_with( $positionals[0], '-' ) ) {
             return [
                 'blocked' => true,
@@ -1060,9 +1385,21 @@ class Cowboy_MCP_Security {
         //    lands. Quotes are already stripped (and internal spaces/quotes/parens
         //    preserved verbatim) by cli_tokens() for each positional, so no further
         //    trimming is needed here.
+        // 3b. `db` commands hand their unknown --flags to mysql / mysqlcheck, and
+        //     some of those carry SQL or load an option file that can (--execute,
+        //     --init-command, --defaults-extra-file …) — SQL the checks in step 4
+        //     never see. Never lifted, for the same reason as step 4's secret check.
+        if ( 'db' === $noun ) {
+            $why = self::cli_db_flag_reason( $t['flags'] );
+            if ( null !== $why ) {
+                return [ 'blocked' => true, 'code' => 'blocked', 'message' => "Blocked: {$why}" ];
+            }
+        }
+
         if ( isset( $positionals[0], $positionals[1] )
             && strtolower( $positionals[0] ) === 'db'
             && in_array( strtolower( $positionals[1] ), [ 'query', 'search' ], true ) ) {
+            $is_search = 'search' === strtolower( $positionals[1] );
             // WP-CLI's `db query`/`db search` synopsis takes exactly ONE positional
             // argument after the verb (the query/pattern). Blindly implode()-ing
             // array_slice($positionals, 2) assumed that was always true; it isn't once
@@ -1075,7 +1412,9 @@ class Cowboy_MCP_Security {
             // Unconditional — never lifted by Power mode — same footing as the
             // never-lifted secret-table check below: this protects that check's own
             // soundness, not a convenience restriction Power mode is meant to relax.
-            $sql_positionals = array_slice( $positionals, 2 );
+            // `db search <pattern> [<tables>…]` names its tables after the pattern;
+            // they are judged in step 4c.
+            $sql_positionals = array_slice( $positionals, 2, $is_search ? 1 : null );
             if ( count( $sql_positionals ) > 1 ) {
                 return [
                     'blocked' => true,
@@ -1116,6 +1455,26 @@ class Cowboy_MCP_Security {
             // Credential/secret access is never lifted, even in Power mode.
             if ( self::sql_touches_secret( $sql ) ) {
                 return [ 'blocked' => true, 'code' => 'blocked', 'message' => 'Query references credential/secret data and is blocked.' ];
+            }
+            // Not lifted by Power mode either: a write to the options table must name its
+            // rows, so the check above can read them. This judges one SQL text. Power mode
+            // keeps other routes to those rows, such as wp_write_file and search-replace.
+            if ( ! $is_search && self::sql_writes_unnamed_option( $sql ) ) {
+                return [ 'blocked' => true, 'code' => 'blocked', 'message' => "A write to the options table must be one UPDATE or DELETE whose only WHERE names its rows: option_name = 'name', IN ('name', ...) or, on a DELETE, LIKE 'pattern'. Use wp option for anything else." ];
+            }
+            // 4c. Option and user/network meta VALUES hold third-party secrets (API
+            //     keys, SMTP passwords, licence keys, session tokens) that every other
+            //     read path redacts by name; shell output cannot be redacted. Without
+            //     Power mode, db query may not read those value columns and db search
+            //     must name its tables, none of them holding options or user data.
+            if ( ! $power_mode && ! $is_search && self::sql_reads_option_values( $sql ) ) {
+                return [ 'blocked' => true, 'code' => 'blocked', 'message' => 'Without Power mode, db query may not read option, user-meta or network-meta values (they hold credentials and cannot be redacted here). Name the columns you need other than option_value/meta_value, or use wp_cli option get, the wordpress://options resources or wp_db_health_report.' ];
+            }
+            if ( ! $power_mode && $is_search ) {
+                $why = self::cli_search_replace_reason( array_slice( $positionals, 3 ), $t['flags'] );
+                if ( null !== $why ) {
+                    return [ 'blocked' => true, 'code' => 'blocked', 'message' => "db search blocked: it prints the matching values, and {$why} An administrator can enable Power mode to allow this." ];
+                }
             }
         }
 
@@ -1159,7 +1518,38 @@ class Cowboy_MCP_Security {
     public static function scrub_secrets( string $text ): string {
         $text = preg_replace( '/\bBearer\s+[A-Za-z0-9._\-]+/i', 'Bearer [REDACTED]', $text );
         $text = preg_replace( '/\bmcp_[0-9a-f]{16,}\b/i', '[REDACTED]', (string) $text );
+        // OAuth tokens are `cmcp_at_<id>.<secret>`: the secret half follows the dot.
+        $text = preg_replace( '/\bcmcp_(?:at|rt)_[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)?/', '[REDACTED]', (string) $text );
+        // Credentials in URLs: userinfo (user:pass@, Sentry-style key@) and webhook paths.
+        $text = preg_replace( '#\b([a-z][a-z0-9+.\-]*://)(?:[^\s/@:"\'<>]+:[^\s/@"\'<>]+|[A-Za-z0-9_\-]{16,})@#i', '$1[REDACTED]@', (string) $text );
+        $text = preg_replace( '#\b(hooks\.slack\.com/(?:services|workflows|triggers)/|discord(?:app)?\.com/api/webhooks/)[^\s"\'<>]+#i', '$1[REDACTED]', (string) $text );
         return (string) $text;
+    }
+
+    /**
+     * Mask secret-looking query values in a logged URL (password-reset `key=`,
+     * `token=`, signatures, one-time codes), on top of scrub_secrets(). Display only.
+     */
+    public static function redact_url_query( string $url ): string {
+        return (string) preg_replace_callback(
+            '/([?&;])([^=&#\s]+)=([^&#\s]*)/',
+            static function ( array $m ): string {
+                $name = strtolower( (string) preg_replace( '/[^a-z]/i', '', rawurldecode( $m[2] ) ) );
+                return preg_match( '/key|token|pass|pwd|secret|auth|code|nonce|sig|session|hash|otp|ticket|credential/', $name )
+                    ? $m[1] . $m[2] . '=[REDACTED]'
+                    : $m[0];
+            },
+            self::scrub_secrets( $url )
+        );
+    }
+
+    /**
+     * Mask the string literals in a SQL statement shown to an agent (another
+     * request's query in the process list may carry a password, a token or a
+     * user's personal data). Display only.
+     */
+    public static function redact_sql_literals( string $sql ): string {
+        return (string) preg_replace( [ "/'(?:[^'\\\\]|\\\\.|'')*'/s", '/"(?:[^"\\\\]|\\\\.|"")*"/s' ], [ "'?'", '"?"' ], $sql );
     }
 
     /** wp-config constants whose exact values are redacted from WP-CLI output. */
@@ -1181,7 +1571,6 @@ class Cowboy_MCP_Security {
                 '/\$[PH]\$[^\s"\',]{31,}/',
                 '/\$argon2(?:id|i|d)\$v=\d+\$[^\s"\']+/',
                 '/\$generic\$[^\s"\',]+/',
-                '/\bcmcp_(?:at|rt)_[A-Za-z0-9_\-]{16,}/',
             ],
             '[REDACTED]',
             $text
@@ -1287,7 +1676,64 @@ class Cowboy_MCP_Security {
         if ( preg_match( '/^(127\.|169\.254\.|10\.|192\.168\.)/', $ip ) ) {
             return false;
         }
+        // PHP's range flags leave these out (and differ across 8.x): CGNAT (also
+        // Alibaba's metadata address and Tailscale), benchmarking, IETF/TEST-NETs,
+        // multicast, IPv6 site-local/multicast/documentation/discard.
+        foreach ( self::NON_PUBLIC_CIDRS as $cidr ) {
+            if ( self::ip_in_cidr( $ip, $cidr ) ) {
+                return false;
+            }
+        }
+        // Addresses that carry an IPv4 address inside (NAT64, 6to4, IPv4-compatible)
+        // reach that IPv4 address: judge it instead.
+        $embedded = self::embedded_ipv4( $ip );
+        if ( null !== $embedded ) {
+            return self::ip_is_public( $embedded );
+        }
         return true;
+    }
+
+    /** Ranges ip_is_public() refuses on top of PHP's NO_PRIV_RANGE / NO_RES_RANGE. */
+    private const NON_PUBLIC_CIDRS = [
+        '0.0.0.0/8', '100.64.0.0/10', '192.0.0.0/24', '192.0.2.0/24', '198.18.0.0/15', '198.51.100.0/24',
+        '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4',
+        'fe80::/10', 'fec0::/10', 'fc00::/7', 'ff00::/8', '2001:db8::/32', '100::/64', '2001::/32',
+    ];
+
+    /** Whether an IP address is inside a CIDR block of the same family. */
+    private static function ip_in_cidr( string $ip, string $cidr ): bool {
+        [ $net, $bits ] = explode( '/', $cidr );
+        $a = @inet_pton( $ip );
+        $b = @inet_pton( $net );
+        if ( false === $a || false === $b || strlen( $a ) !== strlen( $b ) ) {
+            return false;
+        }
+        $bits  = (int) $bits;
+        $bytes = intdiv( $bits, 8 );
+        if ( substr( $a, 0, $bytes ) !== substr( $b, 0, $bytes ) ) {
+            return false;
+        }
+        $rest = $bits % 8;
+        if ( 0 === $rest ) {
+            return true;
+        }
+        $mask = ( 0xFF << ( 8 - $rest ) ) & 0xFF;
+        return ( ord( $a[ $bytes ] ) & $mask ) === ( ord( $b[ $bytes ] ) & $mask );
+    }
+
+    /** The IPv4 address inside a NAT64 (64:ff9b::/96, 64:ff9b:1::/48), 6to4 (2002::/16) or IPv4-compatible (::/96) address, or null. */
+    private static function embedded_ipv4( string $ip ): ?string {
+        $bin = @inet_pton( $ip );
+        if ( false === $bin || 16 !== strlen( $bin ) ) {
+            return null;
+        }
+        if ( self::ip_in_cidr( $ip, '64:ff9b::/96' ) || self::ip_in_cidr( $ip, '64:ff9b:1::/48' ) || self::ip_in_cidr( $ip, '::/96' ) ) {
+            return (string) inet_ntop( substr( $bin, 12, 4 ) );
+        }
+        if ( self::ip_in_cidr( $ip, '2002::/16' ) ) {
+            return (string) inet_ntop( substr( $bin, 2, 4 ) );
+        }
+        return null;
     }
 
     /* ── Local-development host heuristics (ADVISORY ONLY) ── */

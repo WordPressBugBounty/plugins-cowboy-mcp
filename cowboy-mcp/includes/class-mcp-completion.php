@@ -16,9 +16,13 @@ class Cowboy_MCP_Completion {
      * Handle completion/complete requests.
      */
     public static function complete( array $params ): array|WP_Error {
-        $ref      = $params['ref'] ?? [];
-        $argument = $params['argument'] ?? [];
-        $ref_type = $ref['type'] ?? '';
+        // Malformed shapes are answered as "nothing to complete", never a TypeError.
+        $ref      = is_array( $params['ref'] ?? null ) ? $params['ref'] : [];
+        $argument = is_array( $params['argument'] ?? null ) ? $params['argument'] : [];
+        if ( isset( $argument['value'] ) && ! is_string( $argument['value'] ) ) {
+            $argument['value'] = is_scalar( $argument['value'] ) ? (string) $argument['value'] : '';
+        }
+        $ref_type = is_string( $ref['type'] ?? null ) ? $ref['type'] : '';
 
         return match ( $ref_type ) {
             'ref/prompt'   => self::complete_prompt( $ref, $argument ),
@@ -30,8 +34,8 @@ class Cowboy_MCP_Completion {
     /* ── Prompt completions ──────────────────────────────────── */
 
     private static function complete_prompt( array $ref, array $argument ): array {
-        $prompt_name = $ref['name'] ?? '';
-        $arg_name    = $argument['name'] ?? '';
+        $prompt_name = is_string( $ref['name'] ?? null ) ? $ref['name'] : '';
+        $arg_name    = is_string( $argument['name'] ?? null ) ? $argument['name'] : '';
         $prefix      = $argument['value'] ?? '';
 
         // Dynamic special-case: bulk-content-update/post_type returns live post types.
@@ -51,6 +55,12 @@ class Cowboy_MCP_Completion {
         $uri_template = $ref['uri'] ?? '';
         $arg_name     = $argument['name'] ?? '';
         $prefix       = $argument['value'] ?? '';
+
+        // Same scope as reading the resource: a credential that cannot read users
+        // must not enumerate them here either.
+        if ( ! is_string( $uri_template ) || ! Cowboy_MCP_Resources::uri_in_scope( $uri_template ) ) {
+            return self::filter_and_format( [], is_string( $prefix ) ? $prefix : '' );
+        }
 
         return match ( $uri_template ) {
             'wordpress://posts/{id}'    => self::filter_and_format( self::get_recent_post_ids( $prefix ), $prefix ),

@@ -90,6 +90,10 @@ class Cowboy_MCP_Tools {
         'wp_acf_add_row'      => 'cowboy_mcp_acf_check_args',
         'wp_acf_update_row'   => 'cowboy_mcp_acf_check_args',
         'wp_acf_delete_row'   => 'cowboy_mcp_acf_check_args',
+        'wp_woo_update_order'   => 'cowboy_mcp_woo_check_order_args',
+        'wp_woo_delete_order'   => 'cowboy_mcp_woo_check_order_args',
+        'wp_woo_create_refund'  => 'cowboy_mcp_woo_check_order_args',
+        'wp_woo_add_order_note' => 'cowboy_mcp_woo_check_order_args',
     ];
 
     /** Map from domain file path to category name. */
@@ -190,7 +194,11 @@ class Cowboy_MCP_Tools {
      */
     public static function get_settings(): array {
         if ( self::$settings_cache === null ) {
-            self::$settings_cache = get_option( 'cowboy_mcp_settings', [] );
+            $settings = get_option( 'cowboy_mcp_settings', [] );
+            $settings = is_array( $settings ) ? $settings : [];
+            // A missing safe_mode key (lost or deleted settings row) means the default, ON.
+            $settings += [ 'safe_mode' => true ];
+            self::$settings_cache = $settings;
         }
         return self::$settings_cache;
     }
@@ -230,6 +238,12 @@ class Cowboy_MCP_Tools {
 
         $name = $params['name'] ?? '';
         $args = $params['arguments'] ?? [];
+        if ( ! is_string( $name ) ) {
+            return new WP_Error( 'invalid_params', 'Tool name must be a string.', [ 'code' => -32602 ] );
+        }
+        if ( ! is_array( $args ) ) {
+            return new WP_Error( 'invalid_params', 'Tool arguments must be an object.', [ 'code' => -32602 ] );
+        }
 
         /**
          * Filter whether a specific tool is allowed to execute.
@@ -256,7 +270,8 @@ class Cowboy_MCP_Tools {
             // so a file attached in the chat arrives on cowboy_run itself. Hand it to an
             // inner tool that takes a `file` input (wp_upload_media).
             if ( isset( $args['file'] ) && '' !== $args['file'] ) {
-                if ( ! isset( self::$tool_map[ $inner_tool ]['inputSchema']['properties']['file'] ) ) {
+                $inner_props = is_string( $inner_tool ) ? ( self::$tool_map[ $inner_tool ]['inputSchema']['properties'] ?? [] ) : [];
+                if ( ! is_array( $inner_props ) || ! isset( $inner_props['file'] ) ) {
                     return new WP_Error( 'invalid_params', "The file input is only accepted with tool=wp_upload_media, not {$inner_tool}.", [ 'code' => -32602 ] );
                 }
                 $inner_args         = is_array( $inner_args ) ? $inner_args : [];
@@ -873,8 +888,8 @@ class Cowboy_MCP_Tools {
      * Handle the cowboy_discover meta-tool: search/browse tools.
      */
     private static function handle_discover_tools( array $args ): array|WP_Error {
-        $query    = trim( $args['query'] ?? '' );
-        $category = $args['category'] ?? '';
+        $query    = trim( is_scalar( $args['query'] ?? null ) ? (string) $args['query'] : '' );
+        $category = is_string( $args['category'] ?? null ) ? $args['category'] : '';
 
         if ( $query === '' && $category === '' ) {
             return new WP_Error( 'invalid_params', 'Provide a query, a category, or both.', [ 'code' => -32602 ] );
@@ -1295,6 +1310,24 @@ class Cowboy_MCP_Tools {
             $tools[] = $tool;
         }
         return [ 'tools' => $tools, 'categories' => self::$tool_categories ];
+    }
+
+    /**
+     * Whether the current request may call a built-in tool: it exists, is in the
+     * site's allowed_tools, and is in the credential's scope. Resources and
+     * completions use it to serve only what the same credential could read
+     * through the tool that returns that data.
+     */
+    public static function tool_permitted( string $name ): bool {
+        self::load_domains( false );
+        if ( ! isset( self::$tool_map[ $name ] ) ) {
+            return false;
+        }
+        $allowed = self::get_settings()['allowed_tools'] ?? 'all';
+        if ( $allowed !== 'all' && is_array( $allowed ) && ! in_array( $name, $allowed, true ) ) {
+            return false;
+        }
+        return Cowboy_MCP_Security::tool_in_scope( $name, self::$tool_map[ $name ]['annotations'] ?? [] );
     }
 
     /** Category of a loaded tool, or null. Inbound wrappers are known once the abilities phase has run. */

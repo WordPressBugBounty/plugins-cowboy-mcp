@@ -17,6 +17,14 @@ function cowboy_mcp_search_replace_normalize_args( array $args ): array|WP_Error
         }
         $args[ $key ] = (string) $args[ $key ];
     }
+    // The replacement lands in post_content with no kses pass (SQL REPLACE()), so it
+    // may not carry script-capable markup the search text did not already hold. The
+    // handler also judges every affected row (a split handler can be assembled from
+    // innocent-looking halves).
+    if ( isset( $args['search'], $args['replace'] ) && empty( $args['allow_unfiltered_html'] )
+        && Cowboy_MCP_Security::script_capable_count( $args['replace'] ) > Cowboy_MCP_Security::script_capable_count( $args['search'] ) ) {
+        return new WP_Error( 'unfiltered_html_blocked', 'The replacement adds script-capable markup (a script/iframe/style tag, an inline event handler or a javascript: URL). Pass allow_unfiltered_html: true to permit it.' );
+    }
     if ( array_key_exists( 'post_id', $args ) ) {
         $id = $args['post_id'];
         if ( is_string( $id ) && $id !== '' && ctype_digit( $id ) ) {
@@ -28,6 +36,32 @@ function cowboy_mcp_search_replace_normalize_args( array $args ): array|WP_Error
         $args['post_id'] = $id;
     }
     return $args;
+}
+
+/**
+ * Whether replacing $search with $replace in $old adds script-capable markup. Only
+ * a window around each occurrence is compared (the text outside every window is
+ * identical before and after), so a site-wide replace over thousands of long posts
+ * costs a few hundred bytes per occurrence, not two scans of every post.
+ */
+function cowboy_mcp_search_replace_adds_markup( string $old, string $search, string $replace ): bool {
+    if ( '' === $search ) {
+        return false;
+    }
+    $pad    = 256;
+    $new    = str_replace( $search, $replace, $old );
+    $delta  = strlen( $replace ) - strlen( $search );
+    $offset = 0;
+    for ( $i = 0; false !== ( $p = strpos( $old, $search, $offset ) ); $i++ ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition
+        $np    = $p + $i * $delta;
+        $o     = substr( $old, max( 0, $p - $pad ), min( $p, $pad ) + strlen( $search ) + $pad );
+        $n     = substr( $new, max( 0, $np - $pad ), min( $np, $pad ) + strlen( $replace ) + $pad );
+        if ( Cowboy_MCP_Security::script_capable_count( $n ) > Cowboy_MCP_Security::script_capable_count( $o ) ) {
+            return true;
+        }
+        $offset = $p + strlen( $search );
+    }
+    return false;
 }
 
 /** WHERE clause shared by the handler and the dry-run preview. */
@@ -110,6 +144,7 @@ return [
             'post_id'   => [ 'type' => 'integer', 'description' => 'Limit to a single post or page ID (combined with post_type when supplied)', 'minimum' => 1 ],
             'dry_run'   => [ 'type' => 'boolean', 'description' => 'Preview without making changes', 'default' => true ],
             'limit'     => [ 'type' => 'integer', 'description' => 'Max posts to update per call (default 1000)', 'default' => 1000 ],
+            'allow_unfiltered_html' => [ 'type' => 'boolean', 'description' => 'Permit a replacement that adds script-capable markup (script/iframe/style tags, inline event handlers, javascript: URLs) to post content. Off by default: that markup runs for every visitor and admin who views the post.', 'default' => false ],
         ], [ 'title' => 'Search and Replace', 'readOnlyHint' => false, 'destructiveHint' => true, 'idempotentHint' => false, 'openWorldHint' => false ]),
 
     ],
@@ -160,12 +195,10 @@ return [
             // the cowboy_mcp_ option-write guard, the db query|search SQL blocklist, and
             // the safe-mode allowlist) are evaluated in Cowboy_MCP_Security::wp_cli_gate().
             // They match against a tokenized argv-style word sequence rather than the raw
-            // string — shell_exec() runs this through /bin/sh -c, which strips quotes
-            // before WP-CLI ever sees them, so raw-string prefix/regex matching against
-            // the quoted command is bypassable (e.g. `option update 'cowboy_mcp_settings'
-            // x` reads as identical to the unquoted form to the shell, but not to a
-            // str_starts_with() check). See cli_tokens()/wp_cli_gate() for the full
-            // rationale.
+            // string, and the command that runs is rebuilt from those same tokens
+            // (cli_shell_command()), so quoting cannot make the shell read it differently
+            // (e.g. `option update 'cowboy_mcp_settings' x` is the unquoted form to both).
+            // See cli_tokens()/wp_cli_gate() for the full rationale.
             $gate = Cowboy_MCP_Security::wp_cli_gate(
                 $command,
                 Cowboy_MCP_Security::power_mode_enabled(),
@@ -188,13 +221,11 @@ return [
                 ? Cowboy_MCP_Checkpoint::maybe_auto_checkpoint( $command )
                 : null;
 
-            // In Power mode the caller may pass their own --path; don't append a second one.
-            $has_path = (bool) preg_match( '/(^|\s)--path(=|\s)/i', $command );
-            $wp_path  = Cowboy_MCP_Compat::wp_root();
-            $full     = $has_path
-                ? sprintf( 'wp %s --allow-root 2>&1', escapeshellcmd( $command ) )
-                : sprintf( 'wp %s --path=%s --allow-root 2>&1', escapeshellcmd( $command ), escapeshellarg( $wp_path ) );
-            $output   = shell_exec( $full );
+            // Run the words the gate judged, each escapeshellarg()'d (never the raw
+            // string through escapeshellcmd(), which /bin/sh then re-parses
+            // differently). In Power mode the caller may pass their own --path.
+            $full   = Cowboy_MCP_Security::cli_shell_command( $command, Cowboy_MCP_Compat::wp_root() );
+            $output = shell_exec( $full );
 
             $response = [
                 'command' => 'wp ' . $command,
@@ -238,6 +269,15 @@ return [
                     . " $where_sql " . $wpdb->prepare( "ORDER BY ID LIMIT %d", $limit );
                 // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared,PluginCheck.Security.DirectDB.UnescapedDBParameter
                 $targets = $wpdb->get_results( $select_sql, ARRAY_A ) ?: [];
+
+                // REPLACE() is case-sensitive and non-overlapping, like str_replace() / strpos().
+                if ( empty( $a['allow_unfiltered_html'] ) ) {
+                    foreach ( $targets as $t ) {
+                        if ( cowboy_mcp_search_replace_adds_markup( (string) $t['post_content'], $search, $replace ) ) {
+                            return new WP_Error( 'unfiltered_html_blocked', "Replacing in post #{$t['ID']} would add script-capable markup to it. Nothing was changed. Pass allow_unfiltered_html: true to permit it." );
+                        }
+                    }
+                }
 
                 foreach ( array_chunk( array_column( $targets, 'ID' ), 500 ) as $chunk ) {
                     $ids_sql    = implode( ',', array_map( 'intval', $chunk ) );

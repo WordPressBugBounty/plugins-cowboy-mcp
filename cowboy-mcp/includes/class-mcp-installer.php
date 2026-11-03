@@ -117,7 +117,21 @@ class Cowboy_MCP_Installer {
 			return $dir;
 		}
 		$tmp = $dir . '/dl-' . wp_generate_password( 12, false ) . '.zip';
-		$r   = wp_safe_remote_get( $url, [ 'timeout' => 300, 'stream' => true, 'filename' => $tmp ] );
+		// Redirects are followed by hand so every hop stays on https://downloads.wordpress.org.
+		for ( $hop = 0; ; $hop++ ) {
+			$r = wp_safe_remote_get( $url, [ 'timeout' => 300, 'stream' => true, 'filename' => $tmp, 'redirection' => 0 ] );
+			$location = is_wp_error( $r ) ? '' : (string) wp_remote_retrieve_header( $r, 'location' );
+			if ( '' === $location || $hop >= 3 || ! in_array( (int) wp_remote_retrieve_response_code( $r ), [ 301, 302, 303, 307, 308 ], true ) ) {
+				break;
+			}
+			$url = WP_Http::make_absolute_url( $location, $url );
+			if ( wp_parse_url( $url, PHP_URL_SCHEME ) !== 'https' || strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) ) !== 'downloads.wordpress.org' ) {
+				if ( file_exists( $tmp ) ) {
+					wp_delete_file( $tmp );
+				}
+				return new WP_Error( 'invalid_package_url', 'Refusing to download: the package redirected away from https://downloads.wordpress.org.' );
+			}
+		}
 		if ( is_wp_error( $r ) ) {
 			if ( file_exists( $tmp ) ) {
 				wp_delete_file( $tmp );
@@ -267,6 +281,30 @@ class Cowboy_MCP_Installer {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Resolve a stylesheet to an INSTALLED theme. `WP_Theme::exists()` is true for
+	 * any existing directory, parent-relative paths included, so the name must be a
+	 * key of wp_get_themes() (which only lists folders found inside a theme root) and
+	 * carry no `..` / absolute / backslash parts. Symlinked themes stay usable.
+	 * `$main_root_only` also requires the default theme root (the installer builds
+	 * paths from it).
+	 */
+	public static function installed_theme( string $stylesheet, bool $main_root_only = false ): WP_Theme|WP_Error {
+		$not_found = new WP_Error( 'not_found', "Theme '{$stylesheet}' is not installed." );
+		if ( $stylesheet === '' || str_contains( $stylesheet, '..' ) || str_contains( $stylesheet, '\\' ) || str_contains( $stylesheet, "\0" ) || str_starts_with( $stylesheet, '/' ) ) {
+			return $not_found;
+		}
+		$themes = wp_get_themes( [ 'errors' => null ] );
+		if ( ! isset( $themes[ $stylesheet ] ) ) {
+			return $not_found;
+		}
+		$theme = $themes[ $stylesheet ];
+		if ( $main_root_only && untrailingslashit( (string) $theme->get_theme_root() ) !== untrailingslashit( (string) get_theme_root() ) ) {
+			return new WP_Error( 'unsupported_theme_root', "Theme '{$stylesheet}' lives outside the main themes directory; manage it from wp-admin." );
+		}
+		return $theme;
 	}
 
 	/** Self-protection: never let the agent touch cowboy-mcp itself. */
@@ -471,9 +509,9 @@ class Cowboy_MCP_Installer {
 				'active'  => Cowboy_MCP_Compat::is_plugin_active( $target ),
 			];
 		}
-		$theme = wp_get_theme( $target );
-		if ( ! $theme->exists() ) {
-			return new WP_Error( 'not_found', "Theme '{$target}' is not installed." );
+		$theme = self::installed_theme( $target, true );
+		if ( is_wp_error( $theme ) ) {
+			return $theme;
 		}
 		return [
 			'folder'  => $target,
@@ -533,7 +571,8 @@ class Cowboy_MCP_Installer {
 
 		// 2. Backup the live folder.
 		$live   = $root . '/' . $t['folder'];
-		$bkname = sprintf( 'pkgbak-%s-%s-%s-%d.zip', $type, $t['folder'], $t['current'] !== '' ? $t['current'] : 'unknown', time() );
+		// Random suffix: the .htaccess deny does nothing on nginx / Caddy / IIS, so the name must not be guessable.
+		$bkname = sprintf( 'pkgbak-%s-%s-%s-%d-%s.zip', $type, $t['folder'], $t['current'] !== '' ? $t['current'] : 'unknown', time(), strtolower( wp_generate_password( 16, false ) ) );
 		$backup = $bdir . '/' . $bkname;
 		$bk     = self::zip_directory( $live, $backup, $t['folder'] );
 		if ( is_wp_error( $bk ) ) {
@@ -702,9 +741,9 @@ class Cowboy_MCP_Installer {
 			$version = (string) ( $plugins[ $target ]['Version'] ?? '' );
 			$id      = str_contains( $target, '/' ) ? dirname( $target ) : $target;
 		} else {
-			$theme = wp_get_theme( $target );
-			if ( ! $theme->exists() ) {
-				return new WP_Error( 'not_found', "Theme '{$target}' is not installed." );
+			$theme = self::installed_theme( $target, true );
+			if ( is_wp_error( $theme ) ) {
+				return $theme;
 			}
 			if ( $target === get_stylesheet() || $target === get_template() ) {
 				return new WP_Error( 'active_delete', "Theme '{$target}' is the active theme (or its parent). Switch themes first with wp_switch_theme." );
@@ -719,7 +758,7 @@ class Cowboy_MCP_Installer {
 		if ( is_wp_error( $bdir ) ) {
 			return $bdir;
 		}
-		$backup = $bdir . '/' . sprintf( 'pkgbak-%s-%s-%s-%d.zip', $type, str_replace( '/', '_', $id ), $version !== '' ? $version : 'unknown', time() );
+		$backup = $bdir . '/' . sprintf( 'pkgbak-%s-%s-%s-%d-%s.zip', $type, str_replace( '/', '_', $id ), $version !== '' ? $version : 'unknown', time(), strtolower( wp_generate_password( 16, false ) ) );
 		$bk     = self::zip_directory( $path, $backup, $id );
 		if ( is_wp_error( $bk ) ) {
 			if ( is_file( $backup ) ) {

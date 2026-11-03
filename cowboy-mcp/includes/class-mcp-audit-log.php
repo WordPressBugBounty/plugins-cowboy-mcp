@@ -13,7 +13,13 @@ class Cowboy_MCP_Audit_Log {
 	const CRON_HOOK = 'cowboy_mcp_audit_log_cleanup';
 
 	/** @var string[] Secret substrings; a field whose normalized key contains any is redacted. */
-	private const REDACTED_KEY_PARTS = [ 'pass', 'pwd', 'secret', 'token', 'apikey', 'auth', 'bearer', 'nonce', 'salt', 'key' ];
+	private const REDACTED_KEY_PARTS = [ 'pass', 'pwd', 'pswd', 'secret', 'token', 'apikey', 'auth', 'bearer', 'nonce', 'salt', 'key', 'jwt', 'cookie', 'dsn', 'webhook' ];
+
+	/** Argument keys that carry the VALUE of a named setting (`{name: …, value: …}`). */
+	private const VALUE_FIELDS = [ 'value', 'meta_value', 'option_value', 'new_value' ];
+
+	/** Argument keys that NAME the setting whose value sits beside them. */
+	private const NAME_FIELDS = [ 'name', 'option', 'option_name', 'meta_key', 'key', 'field', 'setting' ];
 
 	/**
 	 * Get the full table name.
@@ -213,14 +219,21 @@ class Cowboy_MCP_Audit_Log {
 	 * Strip sensitive values from args before logging.
 	 */
 	public static function redact_sensitive( array $args ): array {
+		$named_secret = self::names_secret( $args );
 		foreach ( $args as $key => &$value ) {
-			if ( is_array( $value ) ) {
-				$value = self::redact_sensitive( $value );
-			} elseif ( self::key_is_sensitive( (string) $key ) ) {
+			// The key is judged before recursing: a secret-named entry hides its whole
+			// subtree (`session_tokens => [...]`, `_application_passwords => [...]`).
+			if ( self::key_is_sensitive( (string) $key )
+				|| ( $named_secret && in_array( $key, self::VALUE_FIELDS, true ) ) ) {
 				$value = '[REDACTED]';
+			} elseif ( is_array( $value ) ) {
+				$value = self::redact_sensitive( $value );
 			} elseif ( 'download_url' === $key && is_string( $value ) ) {
 				// Chat file links are signed: keep host and path, drop the signature.
 				$value = preg_replace( '/[?#].*$/s', '?[REDACTED]', $value );
+			} elseif ( is_string( $value ) && str_starts_with( ltrim( $value ), '{' ) && is_array( json_decode( $value, true ) ) ) {
+				// An object sent as JSON text (some clients send `file` this way).
+				$value = (string) wp_json_encode( self::redact_sensitive( json_decode( $value, true ) ), JSON_UNESCAPED_SLASHES );
 			} elseif ( is_string( $value ) && class_exists( 'Cowboy_MCP_Security' ) ) {
 				// Scrub Bearer tokens / raw MCP keys that slip through as free-text values.
 				$value = Cowboy_MCP_Security::scrub_secrets( $value );
@@ -229,11 +242,32 @@ class Cowboy_MCP_Audit_Log {
 		return $args;
 	}
 
+	/** Whether an argument map names a secret setting (`{name: "smtp_password", value: …}`). */
+	private static function names_secret( array $args ): bool {
+		foreach ( self::NAME_FIELDS as $field ) {
+			$name = $args[ $field ] ?? null;
+			if ( ! is_string( $name ) || '' === $name ) {
+				continue;
+			}
+			if ( self::key_is_sensitive( $name )
+				|| ( class_exists( 'Cowboy_MCP_Security' ) && Cowboy_MCP_Security::is_secret_bearing_option( $name ) ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/**
 	 * Whether a logged arg key looks like it carries a secret (camelCase-safe).
 	 */
 	private static function key_is_sensitive( string $key ): bool {
 		$norm = preg_replace( '/[^a-z]/', '', strtolower( $key ) ); // apiKey -> apikey, access_token -> accesstoken
+		// Names that only look like it: post/comment author fields, SEO keywords, and the
+		// meta/option key a `{key, value}` pair names (its value is judged by names_secret()).
+		$norm = str_replace( [ 'author', 'keyword', 'metakey', 'optionkey', 'metakeys' ], '', (string) $norm );
+		if ( 'key' === $norm || 'keys' === $norm ) {
+			return false;
+		}
 		foreach ( self::REDACTED_KEY_PARTS as $part ) {
 			if ( $norm !== '' && str_contains( $norm, $part ) ) {
 				return true;

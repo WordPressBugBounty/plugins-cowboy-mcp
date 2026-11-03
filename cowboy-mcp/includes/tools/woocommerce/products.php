@@ -2,11 +2,33 @@
 defined( 'ABSPATH' ) || exit;
 
 /**
+ * Split agent-supplied meta into keys that may be written and keys refused by the
+ * same rule as the posts tools (internal `_` keys, credential-looking names).
+ *
+ * @return array{0: array<string,mixed>, 1: string[]} [ allowed key => value, rejected keys ]
+ */
+function cowboy_mcp_woo_filter_meta( array $meta ): array {
+    $allowed  = [];
+    $rejected = [];
+    foreach ( $meta as $key => $value ) {
+        $key = sanitize_key( (string) $key );
+        if ( '' === $key || Cowboy_MCP_Security::is_blocked_meta_key( $key ) ) {
+            $rejected[] = $key;
+            continue;
+        }
+        $allowed[ $key ] = $value;
+    }
+    return [ $allowed, $rejected ];
+}
+
+/**
  * Apply common product fields from args onto a WC_Product object.
  * Shared between create and update handlers.
  */
 function cowboy_mcp_woo_set_product_fields( WC_Product $product, array $a ): void {
-    if ( isset( $a['name'] ) )              $product->set_name( $a['name'] );
+    // Same filtering as the posts tools: product text is post content shown to
+    // every shopper and admin (the MCP user's unfiltered_html would skip kses).
+    if ( isset( $a['name'] ) )              $product->set_name( sanitize_text_field( (string) $a['name'] ) );
     if ( isset( $a['status'] ) )            $product->set_status( $a['status'] );
     if ( isset( $a['regular_price'] ) ) {
         $price = filter_var( $a['regular_price'], FILTER_VALIDATE_FLOAT );
@@ -17,8 +39,8 @@ function cowboy_mcp_woo_set_product_fields( WC_Product $product, array $a ): voi
         $product->set_sale_price( $price !== false ? (string) $price : '' );
     }
     if ( isset( $a['sku'] ) )               $product->set_sku( $a['sku'] );
-    if ( isset( $a['description'] ) )       $product->set_description( $a['description'] );
-    if ( isset( $a['short_description'] ) ) $product->set_short_description( $a['short_description'] );
+    if ( isset( $a['description'] ) )       $product->set_description( wp_kses_post( (string) $a['description'] ) );
+    if ( isset( $a['short_description'] ) ) $product->set_short_description( wp_kses_post( (string) $a['short_description'] ) );
     if ( isset( $a['manage_stock'] ) )      $product->set_manage_stock( $a['manage_stock'] );
     if ( isset( $a['stock_quantity'] ) )    $product->set_stock_quantity( $a['stock_quantity'] );
     if ( isset( $a['weight'] ) )            $product->set_weight( $a['weight'] );
@@ -453,18 +475,21 @@ return [
                 return new WP_Error( 'create_failed', 'Failed to create product.' );
             }
 
-            // Set meta data.
+            // Set meta data (internal / sensitive keys refused, as in wp_update_post).
+            $rejected_meta = [];
             if ( ! empty( $a['meta'] ) && is_array( $a['meta'] ) ) {
-                foreach ( $a['meta'] as $key => $value ) {
-                    update_post_meta( $id, sanitize_key( $key ), $value );
+                [ $allowed_meta, $rejected_meta ] = cowboy_mcp_woo_filter_meta( $a['meta'] );
+                foreach ( $allowed_meta as $key => $value ) {
+                    update_post_meta( $id, $key, $value );
                 }
             }
 
-            return [
-                'created'    => true,
-                'product_id' => $id,
-                'product'    => cowboy_mcp_woo_format_product( wc_get_product( $id ) ),
-            ];
+            return array_filter( [
+                'created'            => true,
+                'product_id'         => $id,
+                'product'            => cowboy_mcp_woo_format_product( wc_get_product( $id ) ),
+                'rejected_meta_keys' => $rejected_meta,
+            ], static fn( $v ) => [] !== $v );
         },
 
         'wp_woo_update_product' => function ( array $a ) {
@@ -479,18 +504,21 @@ return [
 
             $product->save();
 
-            // Set meta data.
+            // Set meta data (internal / sensitive keys refused, as in wp_update_post).
+            $rejected_meta = [];
             if ( ! empty( $a['meta'] ) && is_array( $a['meta'] ) ) {
-                foreach ( $a['meta'] as $key => $value ) {
-                    update_post_meta( $id, sanitize_key( $key ), $value );
+                [ $allowed_meta, $rejected_meta ] = cowboy_mcp_woo_filter_meta( $a['meta'] );
+                foreach ( $allowed_meta as $key => $value ) {
+                    update_post_meta( $id, $key, $value );
                 }
             }
 
-            return [
-                'updated'    => true,
-                'product_id' => $id,
-                'product'    => cowboy_mcp_woo_format_product( wc_get_product( $id ) ),
-            ];
+            return array_filter( [
+                'updated'            => true,
+                'product_id'         => $id,
+                'product'            => cowboy_mcp_woo_format_product( wc_get_product( $id ) ),
+                'rejected_meta_keys' => $rejected_meta,
+            ], static fn( $v ) => [] !== $v );
         },
 
         'wp_woo_delete_product' => function ( array $a ) {

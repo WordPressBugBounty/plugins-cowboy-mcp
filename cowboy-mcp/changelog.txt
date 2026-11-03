@@ -3,6 +3,18 @@
 Full version history for Cowboy MCP. The readme.txt lists the most recent
 release; older entries are kept here.
 
+= 1.7.6 =
+* Changed: Editors count as a privileged role on single sites, like Administrators. Creating or promoting an Editor, or changing an Editor's email, needs Power mode.
+* Changed: more tools refuse script content unless the call passes `allow_unfiltered_html: true`.
+* Changed: `wp_cli` database commands are stricter, with and without Power mode. To change options, use `wp option`.
+* Changed: custom-access keys and connections list and read only the resources their access covers.
+* Improved: every approval of Claude Code, Codex, ChatGPT, Claude or Perplexity is now its own entry under Connected apps, with its own access level, Edit access and Revoke. Reconnecting an app adds a new entry with the access you choose on the approval screen; the earlier one stays listed until it expires.
+* Improved: API keys are recognised faster, and a valid key keeps working while failed attempts from the same IP address are being rate limited. Existing keys are upgraded automatically on their first use.
+* Fix: WooCommerce reports filtered by order status count completed and cancelled orders.
+* Fix: listing WooCommerce orders no longer fails on a store that has refunds. The order tools now answer a refund's ID with a clear error. Before, reading or editing one failed, and deleting one removed the refund.
+* Fix: malformed requests get a JSON-RPC error instead of a server error.
+* Security: hardening. Updating is recommended, and no action is needed afterwards.
+
 = 1.7.5 =
 * New: files attached in a ChatGPT conversation can go straight into the Media Library. Every upload can also be resized and converted to WebP, AVIF, JPEG or PNG on the way in.
 * New: an undo now reports whether the restored item matches what was saved before the change, and lists any field that differs.

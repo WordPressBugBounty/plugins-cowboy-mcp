@@ -15,7 +15,8 @@ function cowboy_mcp_woo_validate_date_range( array $a, array $default_statuses =
     }
 
     $statuses    = $a['status'] ?? $default_statuses;
-    $wc_statuses = array_map( fn( $s ) => 'wc-' . ltrim( $s, 'wc-' ), $statuses );
+    // A prefix, not a character list: ltrim( 'completed', 'wc-' ) is 'ompleted'.
+    $wc_statuses = array_map( fn( $s ) => str_starts_with( (string) $s, 'wc-' ) ? (string) $s : 'wc-' . $s, (array) $statuses );
 
     return [
         'date_after'  => $date_after,
@@ -203,7 +204,9 @@ return [
             $range = cowboy_mcp_woo_validate_date_range( $a );
             if ( is_wp_error( $range ) ) return $range;
 
+            // type: a refund is an order row too, with status wc-completed.
             $orders = wc_get_orders( [
+                'type'         => 'shop_order',
                 'status'       => $range['wc_statuses'],
                 'date_after'   => $range['date_after'],
                 'date_before'  => $range['date_before'],
@@ -371,7 +374,9 @@ return [
             $range = cowboy_mcp_woo_validate_date_range( $a );
             if ( is_wp_error( $range ) ) return $range;
 
+            // type: a refund is an order row too, with status wc-completed.
             $orders = wc_get_orders( [
+                'type'         => 'shop_order',
                 'status'       => $range['wc_statuses'],
                 'date_after'   => $range['date_after'],
                 'date_before'  => $range['date_before'],

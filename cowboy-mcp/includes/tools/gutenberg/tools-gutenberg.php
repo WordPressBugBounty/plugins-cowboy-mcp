@@ -209,6 +209,12 @@ function cowboy_mcp_gutenberg_gate_theme_json( array $fragment, bool $allow_unfi
         if ( $key === 'css' && preg_match( '#</?\w+#', $value ) ) {
             return new WP_Error( 'unfiltered_html_blocked', "Markup is not allowed in CSS (key path: {$key_path})." );
         }
+        // Every theme.json string can end up in the inline <style> core prints (WP 6.2-6.9
+        // print it raw, so a closing tag breaks out into the page; 7.x refuses the whole
+        // stylesheet instead). No consent flag makes that safe.
+        if ( preg_match( '#</|<\s*(?:style|script)\b#i', $value ) ) {
+            return new WP_Error( 'unfiltered_html_blocked', "A closing tag is not allowed in global styles or settings (key path: {$key_path})." );
+        }
         if ( ! $allow_unfiltered && $key !== 'css' ) {
             $reason = cowboy_mcp_gutenberg_unfiltered_reason( $value );
             if ( $reason !== null ) {
@@ -284,6 +290,9 @@ function cowboy_mcp_gutenberg_build_block( array $spec, bool $allow_unfiltered, 
         if ( ! $allow_unfiltered && cowboy_mcp_gutenberg_contains_html_block( $parsed ) ) {
             return new WP_Error( 'unfiltered_html_blocked', "markup at {$context} contains a core/html block. Pass allow_unfiltered_html: true to permit it." );
         }
+        if ( ! $allow_unfiltered && Cowboy_MCP_Security::blocks_attrs_risk( $parsed ) > 0 ) {
+            return new WP_Error( 'unfiltered_html_blocked', "markup at {$context} has block attributes with script-capable values (or a tagName naming a script element). Pass allow_unfiltered_html: true to permit it." );
+        }
         // kses the parsed tree's content strings, never the raw markup —
         // see cowboy_mcp_gutenberg_kses_tree() docblock for why.
         if ( ! $allow_unfiltered ) {
@@ -300,6 +309,9 @@ function cowboy_mcp_gutenberg_build_block( array $spec, bool $allow_unfiltered, 
         return new WP_Error( 'unfiltered_html_blocked', "Block spec at {$context} is a core/html block. Pass allow_unfiltered_html: true to permit it." );
     }
     $attrs   = is_array( $spec['attrs'] ?? null ) ? $spec['attrs'] : [];
+    if ( ! $allow_unfiltered && Cowboy_MCP_Security::attrs_risk( $attrs ) > 0 ) {
+        return new WP_Error( 'unfiltered_html_blocked', "Block spec at {$context} has attributes with script-capable values (or a tagName naming a script element). Pass allow_unfiltered_html: true to permit it." );
+    }
     $content = (string) ( $spec['content'] ?? '' );
     $has_kids = ! empty( $spec['inner_blocks'] ) && is_array( $spec['inner_blocks'] );
 
@@ -395,6 +407,9 @@ function cowboy_mcp_gutenberg_index_ops( array $tree, array $ops, bool $allow_un
                 $has_content = isset( $op['content'] ) && is_string( $op['content'] );
                 if ( ! $has_attrs && ! $has_content ) {
                     return new WP_Error( 'invalid_params', "{$ctx}: update needs attrs and/or content." );
+                }
+                if ( $has_attrs && ! $allow_unfiltered && Cowboy_MCP_Security::attrs_risk( $op['attrs'] ) > 0 ) {
+                    return new WP_Error( 'unfiltered_html_blocked', "{$ctx}: attrs for {$path} carry script-capable values (or a tagName naming a script element). Pass allow_unfiltered_html: true to permit it." );
                 }
                 if ( $has_content ) {
                     if ( ! empty( $node['innerBlocks'] ) ) {
@@ -724,13 +739,19 @@ function cowboy_mcp_gutenberg_get_user_pattern( int $id ): WP_Post|WP_Error {
  * policy. The gate inspects the raw string; kses is applied per-node via
  * cowboy_mcp_gutenberg_kses_tree() so block delimiter comments survive.
  */
-function cowboy_mcp_gutenberg_filter_full_content( string $content, bool $allow_unfiltered, string $context ): string|WP_Error {
+function cowboy_mcp_gutenberg_filter_full_content( string $content, bool $allow_unfiltered, string $context, string $current = '' ): string|WP_Error {
     $parsed = cowboy_mcp_gutenberg_parse( $content );
     if ( ! $allow_unfiltered ) {
         if ( cowboy_mcp_gutenberg_contains_html_block( $parsed ) ) {
             return new WP_Error( 'unfiltered_html_blocked', "{$context} contains a core/html block. Pass allow_unfiltered_html: true to permit it." );
         }
         $reason = cowboy_mcp_gutenberg_unfiltered_reason( $content );
+        // Comparative: an untouched block of the stored content (an icon block with inline
+        // SVG in its attrs) may come back as it was; only added risk counts.
+        $before = '' === $current ? 0 : Cowboy_MCP_Security::blocks_attrs_risk( cowboy_mcp_gutenberg_parse( $current ) );
+        if ( $reason === null && Cowboy_MCP_Security::blocks_attrs_risk( $parsed ) > $before ) {
+            $reason = 'block attributes with script-capable values (or a tagName naming a script element)';
+        }
         if ( $reason !== null ) {
             return new WP_Error( 'unfiltered_html_blocked', "{$context} contains {$reason}. Pass allow_unfiltered_html: true to permit it (this writes markup that runs on the front end)." );
         }
@@ -1298,7 +1319,7 @@ $cowboy_mcp_gutenberg_handlers = [
             $changed[]          = 'title';
         }
         if ( isset( $a['content'] ) ) {
-            $content = cowboy_mcp_gutenberg_filter_full_content( (string) $a['content'], $allow, 'content' );
+            $content = cowboy_mcp_gutenberg_filter_full_content( (string) $a['content'], $allow, 'content', (string) $post->post_content );
             if ( is_wp_error( $content ) ) {
                 return $content;
             }
@@ -1512,7 +1533,8 @@ if ( wp_is_block_theme() ) {
 
         $content = null;
         if ( isset( $a['content'] ) ) {
-            $content = cowboy_mcp_gutenberg_filter_full_content( (string) $a['content'], $allow, 'content' );
+            $existing = cowboy_mcp_gutenberg_get_template_object( $id, $type );
+            $content  = cowboy_mcp_gutenberg_filter_full_content( (string) $a['content'], $allow, 'content', is_wp_error( $existing ) ? '' : (string) $existing->content );
             if ( is_wp_error( $content ) ) {
                 return $content;
             }

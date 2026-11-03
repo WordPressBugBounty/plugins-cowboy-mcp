@@ -18,6 +18,34 @@ function cowboy_mcp_woo_set_address_fields( $object, string $prefix, array $data
 }
 
 /**
+ * Load an order for the order tools. A refund is a row in the orders table too, and
+ * wc_get_order() returns it, but it is not a WC_Order: it has no status setter, notes or
+ * format here, and deleting one would change its parent's totals behind the order tools.
+ */
+function cowboy_mcp_woo_get_order( int $id ): WC_Order|WP_Error {
+    $order = wc_get_order( $id );
+
+    if ( $order instanceof WC_Order ) {
+        return $order;
+    }
+    if ( $order instanceof WC_Order_Refund ) {
+        $parent = $order->get_parent_id();
+        return new WP_Error( 'not_an_order', "{$id} is a refund of order {$parent}, not an order. Read order {$parent} to see its refunds." );
+    }
+
+    return new WP_Error( 'not_found', "Order not found: {$id}" );
+}
+
+/**
+ * PRE_DISPATCH check for the order write tools, so a preview refuses what the handler refuses.
+ */
+function cowboy_mcp_woo_check_order_args( array $a ): array|WP_Error {
+    $order = cowboy_mcp_woo_get_order( (int) ( $a['order_id'] ?? 0 ) );
+
+    return is_wp_error( $order ) ? $order : $a;
+}
+
+/**
  * Format a WC_Order into a standardized array for MCP responses.
  */
 function cowboy_mcp_woo_format_order( WC_Order $order ): array {
@@ -320,6 +348,7 @@ return [
             $page     = max( (int) ( $a['page'] ?? 1 ), 1 );
 
             $args = [
+                'type'     => 'shop_order', // A refund is an order row too, and cowboy_mcp_woo_format_order() takes WC_Order.
                 'limit'    => $per_page,
                 'page'     => $page,
                 'orderby'  => $a['orderby'] ?? 'date',
@@ -348,10 +377,10 @@ return [
 
         'wp_woo_get_order' => function ( array $a ) {
             $id    = (int) ( $a['order_id'] ?? 0 );
-            $order = wc_get_order( $id );
+            $order = cowboy_mcp_woo_get_order( $id );
 
-            if ( ! $order ) {
-                return new WP_Error( 'not_found', "Order not found: {$id}" );
+            if ( is_wp_error( $order ) ) {
+                return $order;
             }
 
             return cowboy_mcp_woo_format_order( $order );
@@ -402,27 +431,31 @@ return [
             $order->calculate_totals();
             $order->save();
 
-            // Set meta data.
+            // Set meta data (internal / sensitive keys refused: an internal order key is
+            // a property setter, and the posts tools refuse the same keys).
+            $rejected_meta = [];
             if ( ! empty( $a['meta'] ) && is_array( $a['meta'] ) ) {
-                foreach ( $a['meta'] as $key => $value ) {
-                    $order->update_meta_data( sanitize_key( $key ), $value );
+                [ $allowed_meta, $rejected_meta ] = cowboy_mcp_woo_filter_meta( $a['meta'] );
+                foreach ( $allowed_meta as $key => $value ) {
+                    $order->update_meta_data( $key, $value );
                 }
                 $order->save_meta_data();
             }
 
-            return [
-                'created'  => true,
-                'order_id' => $order->get_id(),
-                'order'    => cowboy_mcp_woo_format_order( $order ),
-            ];
+            return array_filter( [
+                'created'            => true,
+                'order_id'           => $order->get_id(),
+                'order'              => cowboy_mcp_woo_format_order( $order ),
+                'rejected_meta_keys' => $rejected_meta,
+            ], static fn( $v ) => [] !== $v );
         },
 
         'wp_woo_update_order' => function ( array $a ) {
             $id    = (int) ( $a['order_id'] ?? 0 );
-            $order = wc_get_order( $id );
+            $order = cowboy_mcp_woo_get_order( $id );
 
-            if ( ! $order ) {
-                return new WP_Error( 'not_found', "Order not found: {$id}" );
+            if ( is_wp_error( $order ) ) {
+                return $order;
             }
 
             if ( isset( $a['status'] ) )         $order->set_status( $a['status'] );
@@ -437,30 +470,34 @@ return [
                 cowboy_mcp_woo_set_address_fields( $order, 'shipping', $a['shipping'] );
             }
 
-            // Set meta data.
+            // Set meta data (internal / sensitive keys refused: an internal order key is
+            // a property setter, and the posts tools refuse the same keys).
+            $rejected_meta = [];
             if ( ! empty( $a['meta'] ) && is_array( $a['meta'] ) ) {
-                foreach ( $a['meta'] as $key => $value ) {
-                    $order->update_meta_data( sanitize_key( $key ), $value );
+                [ $allowed_meta, $rejected_meta ] = cowboy_mcp_woo_filter_meta( $a['meta'] );
+                foreach ( $allowed_meta as $key => $value ) {
+                    $order->update_meta_data( $key, $value );
                 }
                 $order->save_meta_data();
             }
 
             $order->save();
 
-            return [
-                'updated'  => true,
-                'order_id' => $id,
-                'order'    => cowboy_mcp_woo_format_order( wc_get_order( $id ) ),
-            ];
+            return array_filter( [
+                'updated'            => true,
+                'order_id'           => $id,
+                'order'              => cowboy_mcp_woo_format_order( wc_get_order( $id ) ),
+                'rejected_meta_keys' => $rejected_meta,
+            ], static fn( $v ) => [] !== $v );
         },
 
         'wp_woo_delete_order' => function ( array $a ) {
             $id    = (int) ( $a['order_id'] ?? 0 );
             $force = (bool) ( $a['force'] ?? false );
-            $order = wc_get_order( $id );
+            $order = cowboy_mcp_woo_get_order( $id );
 
-            if ( ! $order ) {
-                return new WP_Error( 'not_found', "Order not found: {$id}" );
+            if ( is_wp_error( $order ) ) {
+                return $order;
             }
 
             $result = $order->delete( $force );
@@ -478,10 +515,10 @@ return [
 
         'wp_woo_create_refund' => function ( array $a ) {
             $order_id = (int) ( $a['order_id'] ?? 0 );
-            $order    = wc_get_order( $order_id );
+            $order    = cowboy_mcp_woo_get_order( $order_id );
 
-            if ( ! $order ) {
-                return new WP_Error( 'not_found', "Order not found: {$order_id}" );
+            if ( is_wp_error( $order ) ) {
+                return $order;
             }
 
             $refund_args = [
@@ -529,10 +566,10 @@ return [
 
         'wp_woo_list_order_notes' => function ( array $a ) {
             $order_id = (int) ( $a['order_id'] ?? 0 );
-            $order    = wc_get_order( $order_id );
+            $order    = cowboy_mcp_woo_get_order( $order_id );
 
-            if ( ! $order ) {
-                return new WP_Error( 'not_found', "Order not found: {$order_id}" );
+            if ( is_wp_error( $order ) ) {
+                return $order;
             }
 
             $type_filter = $a['type'] ?? 'any';
@@ -563,10 +600,10 @@ return [
 
         'wp_woo_add_order_note' => function ( array $a ) {
             $order_id = (int) ( $a['order_id'] ?? 0 );
-            $order    = wc_get_order( $order_id );
+            $order    = cowboy_mcp_woo_get_order( $order_id );
 
-            if ( ! $order ) {
-                return new WP_Error( 'not_found', "Order not found: {$order_id}" );
+            if ( is_wp_error( $order ) ) {
+                return $order;
             }
 
             $note        = $a['note'] ?? '';
