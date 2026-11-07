@@ -3,7 +3,7 @@
  * Plugin Name: Cowboy MCP
  * Plugin URI:  https://cowboymcp.com
  * Description: Turns your WordPress site into a Model Context Protocol (MCP) server so AI agents like Claude, ChatGPT, Cursor and Claude Code can read, edit, and manage everything on the site - with per-change undo and database checkpoints.
- * Version:     1.7.6
+ * Version:     1.7.7
  * Author:      februality
  * Author URI:  https://profiles.wordpress.org/februality/
  * License:     GPL-2.0-or-later
@@ -41,12 +41,13 @@ along with Cowboy MCP. If not, see https://www.gnu.org/licenses/gpl-2.0.html.
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'COWBOY_MCP_VERSION', '1.7.6' );
+define( 'COWBOY_MCP_VERSION', '1.7.7' );
 define( 'COWBOY_MCP_PATH',    plugin_dir_path( __FILE__ ) );
 define( 'COWBOY_MCP_URL',     plugin_dir_url( __FILE__ ) );
 
 /* ── Autoload ─────────────────────────────────────────────── */
 require_once COWBOY_MCP_PATH . 'includes/class-mcp-security.php';
+require_once COWBOY_MCP_PATH . 'includes/class-mcp-drafts.php';
 require_once COWBOY_MCP_PATH . 'includes/class-mcp-compat.php';
 require_once COWBOY_MCP_PATH . 'includes/class-mcp-audit-log.php';
 require_once COWBOY_MCP_PATH . 'includes/class-mcp-rollback.php';
@@ -62,17 +63,20 @@ require_once COWBOY_MCP_PATH . 'includes/class-mcp-resources.php';
 require_once COWBOY_MCP_PATH . 'includes/class-mcp-prompts.php';
 require_once COWBOY_MCP_PATH . 'includes/class-mcp-completion.php';
 require_once COWBOY_MCP_PATH . 'includes/class-mcp-oauth.php';
+require_once COWBOY_MCP_PATH . 'includes/class-mcp-oauth-address.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin-connections.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin-activity.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin-logs.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin-settings.php';
+require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin-drafts.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-feedback.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-hub-promo.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-repair-notice.php';
 
 /* ── Boot ─────────────────────────────────────────────────── */
 add_action( 'plugins_loaded', function () {
+    Cowboy_MCP_Drafts::init();
     Cowboy_MCP_Audit_Log::init();
     Cowboy_MCP_Rollback::init();
     Cowboy_MCP_Checkpoint::init();
@@ -81,6 +85,7 @@ add_action( 'plugins_loaded', function () {
     Cowboy_MCP_Auth::init();
     Cowboy_MCP_Transport::init();
     Cowboy_MCP_Admin::init();
+    Cowboy_MCP_Admin_Drafts::init();
     Cowboy_MCP_Feedback::init();
     Cowboy_MCP_Hub_Promo::init();
     Cowboy_MCP_Repair_Notice::init();
@@ -113,6 +118,11 @@ add_action( 'init', function () {
         wp_schedule_event( time(), 'daily', Cowboy_MCP_Audit_Log::CRON_HOOK );
     }
 });
+
+/* ── Sign-in address self-check: daily, and once after each update ── */
+add_action( 'init', [ 'Cowboy_MCP_OAuth_Address', 'maybe_schedule_upgrade_check' ] );
+add_action( Cowboy_MCP_OAuth_Address::UPGRADE_HOOK, [ 'Cowboy_MCP_OAuth_Address', 'run_upgrade_check' ] );
+add_action( Cowboy_MCP_Audit_Log::CRON_HOOK, [ 'Cowboy_MCP_OAuth_Address', 'maybe_check' ] );
 
 /* ── Translations ─────────────────────────────────────────── */
 // REQUIRED — do not remove. Plugin Check warns that load_plugin_textdomain()
@@ -175,6 +185,7 @@ register_activation_hook( __FILE__, function () {
 
 register_deactivation_hook( __FILE__, function () {
     wp_clear_scheduled_hook( Cowboy_MCP_Audit_Log::CRON_HOOK );
+    wp_clear_scheduled_hook( Cowboy_MCP_OAuth_Address::UPGRADE_HOOK );
     cowboy_mcp_cleanup_transients( false );
     flush_rewrite_rules();
 });
@@ -199,6 +210,16 @@ function cowboy_mcp_uninstall(): void {
     wp_clear_scheduled_hook( 'cowboy_mcp_placeholder_scan' );
     wp_clear_scheduled_hook( 'cowboy_mcp_placeholder_repair' );
     delete_transient( 'cowboy_mcp_feedback_gate' );
+
+    // Sign-in address: stored decision, version gate, lock row, signals, scheduled check.
+    delete_option( 'cowboy_mcp_oauth_address' );
+    delete_option( 'cowboy_mcp_oauth_address_ver' );
+    delete_option( 'cowboy_mcp_oauth_address_lock' );
+    delete_transient( 'cowboy_mcp_oauth_address_lock' );
+    delete_transient( 'cowboy_mcp_signin_root_fetch' );
+    delete_transient( 'cowboy_mcp_signin_watch' );
+    delete_transient( 'cowboy_mcp_signin_pending' );
+    wp_clear_scheduled_hook( 'cowboy_mcp_oauth_address_check' );
 
     // Remove per-user admin preferences (remembered connection method).
     delete_metadata( 'user', 0, 'cowboy_mcp_conn_method', '', true );
@@ -265,6 +286,8 @@ function cowboy_mcp_cleanup_transients( bool $include_new_key ): void {
     $wpdb->query( $wpdb->prepare( "DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s", $wpdb->options, '_transient_cowboy_mcp_sess_%', '_transient_timeout_cowboy_mcp_sess_%' ) );
     // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
     $wpdb->query( $wpdb->prepare( "DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s", $wpdb->options, '_transient_cowboy_mcp_oauth_code_%', '_transient_timeout_cowboy_mcp_oauth_code_%' ) );
+    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+    $wpdb->query( $wpdb->prepare( "DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s", $wpdb->options, '_transient_cowboy_mcp_signin_self_check_%', '_transient_timeout_cowboy_mcp_signin_self_check_%' ) );
     if ( $include_new_key ) {
         // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
         $wpdb->query( $wpdb->prepare( "DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s", $wpdb->options, '_transient_cowboy_mcp_new_key_%', '_transient_timeout_cowboy_mcp_new_key_%' ) );

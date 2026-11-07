@@ -5,7 +5,7 @@ Tags: mcp, mcp-server, model-context-protocol, claude, claude-code
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 8.0
-Stable tag: 1.7.6
+Stable tag: 1.7.7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -75,7 +75,7 @@ Plus 17 read-only MCP resources, 4 resource templates and 8 guided workflow prom
 
 = One-click sign-in for every app =
 
-Every app sends you to a sign-in page on your own site: the cloud apps and IDEs with one button, the terminal tools with one command. The consent screen names the app and lets you grant full access, read-only, or a hand-picked list of tools; nothing is granted until you click **Approve**. Keys remain for scripts and CI.
+Every app sends you to a sign-in page on your own site: the cloud apps and IDEs with one button, the terminal tools with one command. The consent screen names the app and lets you grant full access, read-only, drafts only, or a hand-picked list of tools; nothing is granted until you click **Approve**. Keys remain for scripts and CI.
 
 = Connect Claude Code to WordPress =
 
@@ -92,7 +92,7 @@ No terminal: click **Add to Claude** on the Connections tab and approve the sign
 
 = Connect ChatGPT to WordPress =
 
-ChatGPT connects with the same one-click sign-in from a Business, Enterprise or Edu workspace on the web (Pro: read-only); it needs a public HTTPS site.
+ChatGPT connects with the same one-click sign-in on the web, from a Plus account or a Business, Enterprise or Edu workspace; it needs a public HTTPS site.
 
 1. Click **Open ChatGPT** on the Connections tab (it copies your connection link).
 2. In ChatGPT, go to **Plugins → Add → Add custom MCP server**, paste the link as the Server URL, keep **OAuth** and click **Create as a plugin**.
@@ -161,7 +161,7 @@ Local, Studio, MAMP, DevKinsta, wp-env, Docker: terminal and IDE tools sign in o
 * **Database checkpoints** - one-click database snapshots, taken automatically before plugin and theme updates and mutating WP-CLI commands (tables only, not uploads or code).
 * **Safe plugin and theme updates** - file backup and database checkpoint first, then a health check that restores the previous version if the site breaks.
 * **Audit log** - every tool call, error and authentication event on the Logs tab; pruned after 30 days.
-* **AI agent permissions** - each API key and OAuth connection can be full access, read-only, or a custom list of tools.
+* **AI agent permissions** - each API key and OAuth connection can be full access, read-only, drafts only, or a custom list of tools.
 * **Inert until you connect something** - the endpoint goes live on activation but refuses every request until you create an API key or approve an app in your browser; there is no default credential and browser sign-in is off until you turn it on.
 * **Hashed keys, rate limits, origin checks** - keys are shown once and stored as one-way hashes, requests are rate-limited per key, and unknown browser origins are rejected.
 * **Guardrails you cannot talk your way past** - a denylist of sensitive options, dangerous SQL and WP-CLI commands, SSRF protection, file writes confined to `wp-content`, and last-administrator protection. Power mode lifts some for rare jobs; only a human can switch it on in wp-admin.
@@ -201,6 +201,8 @@ Questions and connection problems: post in the [support forum](https://wordpress
 
 Headless or CI? Click **Generate API key** on the Connections tab (it is shown once - copy it) and add `--header "Authorization: Bearer YOUR_API_KEY"` to the first line instead of running the second.
 
+WordPress in a subfolder (or a multisite subsite)? Run only the first line, then start `claude`, run `/mcp`, choose the server and pick **Authenticate**.
+
 **Claude desktop / web (no terminal):** click **Add to Claude** on the Connections tab (Claude opens with your site already filled in; browser sign-in is switched on for you) and approve with one click. (Requires a public HTTPS site; on a local site use the `mcp-remote` bridge shown on the Connections tab.)
 
 **Every other client:** the Connections tab shows a ready-to-copy setup for each, and [cowboymcp.com](https://cowboymcp.com/?utm_source=wporg&utm_medium=listing) has step-by-step guides.
@@ -213,7 +215,7 @@ A plugin that lets AI assistants act on your site through the Model Context Prot
 
 = How do I connect ChatGPT to my WordPress site? =
 
-Click **Open ChatGPT** on the ChatGPT panel of the Connections tab in Cowboy MCP; it copies your connection link. In ChatGPT on the web, go to **Plugins**, click **Add > Add custom MCP server**, paste the link as the Server URL, keep OAuth, acknowledge the risk warning and click **Create as a plugin**. Approve the sign-in on your site as an administrator, install the plugin, then pick it from the **+** menu in a chat (or type **@** and its name). It needs a Business, Enterprise or Edu workspace (Pro: read-only) and a public HTTPS site.
+Click **Open ChatGPT** on the ChatGPT panel of the Connections tab in Cowboy MCP; it copies your connection link. In ChatGPT on the web, go to **Plugins**, click **Add > Add custom MCP server**, paste the link as the Server URL, keep OAuth, acknowledge the risk warning and click **Create as a plugin**. Approve the sign-in on your site as an administrator, install the plugin, then pick it from the **+** menu in a chat (or type **@** and its name). It needs a Plus account or a Business, Enterprise or Edu workspace (where an admin grants the **Create plugins with MCPs** permission) and a public HTTPS site.
 
 = How do I connect Claude to my WordPress site? =
 
@@ -229,7 +231,7 @@ It is built so a mistake can be reversed. Keys are hashed and shown once, reques
 
 = Can I limit what an AI agent is allowed to do? =
 
-Yes. Every API key and every OAuth connection carries a scope: full access, read-only, or a custom list of allowed tools, chosen when the key is created or the connection is approved. Safe mode adds confirmation for destructive tools on top, and the most powerful operations stay locked behind Power mode, which only an administrator can enable in wp-admin.
+Yes. Every API key and every OAuth connection carries a scope: full access, read-only, drafts only, or a custom list of allowed tools, chosen when the key is created or the connection is approved. Drafts only lets the AI write drafts and upload images but never publish: an edit to a live post goes to a draft copy that you review and publish yourself. Safe mode adds confirmation for destructive tools on top, and the most powerful operations stay locked behind Power mode, which only an administrator can enable in wp-admin.
 
 = Do I need to be a developer? =
 
@@ -288,6 +290,8 @@ Start with the **Connection Doctor** on the Connections tab. It tests HTTPS, the
 * **"Registration is closed"** - new AI apps can register only while "New connections" is on: on the Connections tab pick the app ("Connect another app" if the list is not shown), click "Enable for 30 minutes", then add the connector.
 * **Connector stopped after a staging sync or database restore** - click "Enable for 30 minutes", then Reconnect in the AI app and approve again. Nothing needs removing.
 * **"Not an allowed redirect host"** - the connector only returns approvals to known AI apps and localhost; add another OAuth client's host (for example a self-hosted n8n) under Settings > Browser sign-in > Additional allowed hosts.
+* **"Missing or invalid Authorization header" although the key is right** - some hosts remove the Authorization header before WordPress sees it. The Doctor detects this and shows the server setting that passes it through. Until then, a connection that uses an API key can send it in an `X-Cowboy-MCP-Key` header instead, for example `--header "X-Cowboy-MCP-Key: mcp_..."`. The same header works on staging sites behind a password prompt (HTTP Basic login). Apps that sign in through the browser always need the Authorization header.
+* **Browser sign-in on a subfolder site or a host that blocks `/.well-known/`** - both work: Cowboy MCP notices the block and signs apps in under `/wp-json/` instead. If a host blocks that too, the Connections tab says so and shows the server rule to change.
 * **Connected, but "no tools"** - the agent sees two gateway tools and discovers the rest on demand; ask it to "discover tools for WooCommerce". If even those are missing, check the key's scope.
 
 Still stuck? Paste the Doctor report into a new topic in the [support forum](https://wordpress.org/support/plugin/cowboy-mcp/) - topics are usually answered within a day.
@@ -303,17 +307,17 @@ Still stuck? Paste the Doctor report into a new topic in the [support forum](htt
 
 == Changelog ==
 
-= 1.7.6 =
-* Changed: Editors count as a privileged role on single sites, like Administrators. Creating or promoting an Editor, or changing an Editor's email, needs Power mode.
-* Changed: more tools refuse script content unless the call passes `allow_unfiltered_html: true`.
-* Changed: `wp_cli` database commands are stricter, with and without Power mode. To change options, use `wp option`.
-* Changed: custom-access keys and connections list and read only the resources their access covers.
-* Improved: every approval of Claude Code, Codex, ChatGPT, Claude or Perplexity is now its own entry under Connected apps, with its own access level, Edit access and Revoke. Reconnecting an app adds a new entry with the access you choose on the approval screen; the earlier one stays listed until it expires.
-* Improved: API keys are recognised faster, and a valid key keeps working while failed attempts from the same IP address are being rate limited. Existing keys are upgraded automatically on their first use.
-* Fix: WooCommerce reports filtered by order status count completed and cancelled orders.
-* Fix: listing WooCommerce orders no longer fails on a store that has refunds. The order tools now answer a refund's ID with a clear error. Before, reading or editing one failed, and deleting one removed the refund.
-* Fix: malformed requests get a JSON-RPC error instead of a server error.
-* Security: hardening. Updating is recommended, and no action is needed afterwards.
+= 1.7.7 =
+* New: Claude, ChatGPT and other apps can now sign in to sites where they could not before: WordPress installed in a subfolder (example.com/blog), multisite subsites, and hosts or Cloudflare rules that block /.well-known/. Cowboy MCP finds the sign-in address that works on your host by itself. There is nothing to configure, and apps that are already connected are never moved.
+* New: if a connection attempt fails, you no longer have to guess why. The Connections tab tells you the first sign-in did not finish and shows the one step to retry in that app.
+* New: "Drafts only" access. Let an AI write and update posts without letting it publish anything. Changes to a live post land in a draft copy you review and publish yourself. With Yoast Duplicate Post active, one click on Republish puts them live. The AI can still read the whole site and upload images.
+* New: API keys now work on hosts that strip the Authorization header and on staging sites behind an HTTP password. Send the key in an `X-Cowboy-MCP-Key` header instead.
+* Improved: the Connection Doctor names the host problem and the fix. That includes a blocked /.well-known/ (with Cloudflare steps when Cloudflare fronts the site) and a stripped Authorization header. It also offers a one-click switch to the other sign-in address.
+* Improved: the setup steps match what Claude, ChatGPT, Gemini and Grok show today. ChatGPT Plus accounts can add the server, and ChatGPT workspaces need the "Create plugins with MCPs" permission. On subfolder sites, Claude Code signs in from /mcp, and server names include the folder so two sites on one domain do not collide.
+* Improved: newer AI apps (MCP 2025-11-25) see a refused tool call as an error they can read and correct, so they fix their own mistakes instead of stopping.
+* Changed: on single sites, an API key acts as the administrator who created it. If that person is deleted or stops being an administrator, the key stops working, so a former admin's key no longer keeps access. Keys created before 1.7.5 are not affected.
+* Changed: page caches and CDNs no longer store Cowboy MCP's responses, so an outdated "not signed in" answer cannot get stuck in a cache.
+* Fix: some Apache hosts hid a valid API key from WordPress, and connections failed with "Missing Authorization header". Those connections now work.
 
 = Earlier versions =
 

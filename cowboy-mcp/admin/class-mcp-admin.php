@@ -26,6 +26,8 @@ class Cowboy_MCP_Admin {
         add_action( 'wp_ajax_cowboy_mcp_connect_status', [ __CLASS__, 'ajax_connect_status' ] );
         add_action( 'wp_ajax_cowboy_mcp_start_connect', [ __CLASS__, 'ajax_start_connect' ] );
         add_action( 'wp_ajax_cowboy_mcp_set_conn_client', [ __CLASS__, 'ajax_set_conn_client' ] );
+        add_action( 'wp_ajax_cowboy_mcp_signin_browser_check', [ __CLASS__, 'ajax_signin_browser_check' ] );
+        add_action( 'wp_ajax_cowboy_mcp_signin_override', [ __CLASS__, 'ajax_signin_override' ] );
     }
 
     public static function add_menu(): void {
@@ -126,7 +128,7 @@ class Cowboy_MCP_Admin {
         if ( 'connected' === $st['stage'] ) {
             delete_transient( 'cowboy_mcp_connect_watch_' . get_current_user_id() );
         }
-        wp_send_json_success( [ 'stage' => $st['stage'], 'reused' => $st['reused'], 'text' => Cowboy_MCP_Admin_Connections::connect_status_text( $st ), 'done' => 'connected' === $st['stage'] ] );
+        wp_send_json_success( [ 'stage' => $st['stage'], 'reused' => $st['reused'], 'heading' => Cowboy_MCP_Admin_Connections::connect_status_heading( $st ), 'text' => Cowboy_MCP_Admin_Connections::connect_status_text( $st ), 'done' => 'connected' === $st['stage'] ] );
     }
 
     /**
@@ -147,8 +149,10 @@ class Cowboy_MCP_Admin {
         }
         if ( 'oauth' === $mode && class_exists( 'Cowboy_MCP_OAuth' ) ) {
             self::enable_oauth_connector();
-            // CIMD clients (Claude Code, Codex) never register, so their Copy leaves the window alone.
-            if ( empty( $reg[ $client ]['cimd'] ) ) {
+            // CIMD clients (Claude Code, Codex) never register, so their Copy leaves the window alone,
+            // unless no discovery document is reachable, or the advertised root ones are blocked: the SDK
+            // then finds no metadata and falls back to DCR at /register.
+            if ( empty( $reg[ $client ]['cimd'] ) || ! empty( Cowboy_MCP_OAuth_Address::state()['unreachable'] ) || Cowboy_MCP_OAuth_Address::root_known_blocked() ) {
                 Cowboy_MCP_OAuth::open_registration_window();
             }
         }
@@ -157,7 +161,65 @@ class Cowboy_MCP_Admin {
         $st = Cowboy_MCP_Admin_Connections::connect_status( (array) $w );
         ob_start();
         Cowboy_MCP_Admin_Connections::render_connect_status();
-        wp_send_json_success( [ 'stage' => $st['stage'], 'text' => Cowboy_MCP_Admin_Connections::connect_status_text( $st ), 'html' => (string) ob_get_clean() ] );
+        // Sign-in may have been off when the page loaded: hand the browser check its data now.
+        wp_send_json_success( [ 'stage' => $st['stage'], 'text' => Cowboy_MCP_Admin_Connections::connect_status_text( $st ), 'html' => (string) ob_get_clean(), 'signin' => 'oauth' === $mode ? self::signin_check_config() : null ] );
+    }
+
+    /**
+     * The Connections tab's browser check (signinBrowserCheck() in mcp-admin.js): what the
+     * admin's browser saw of the three discovery documents. Then the "tab opened / sign-in
+     * turned on" self-check, when the last one is over an hour old.
+     */
+    public static function ajax_signin_browser_check(): void {
+        check_ajax_referer( Cowboy_MCP_OAuth_Address::BROWSER_NONCE );
+        if ( ! current_user_can( Cowboy_MCP_Security::admin_capability() ) ) {
+            wp_send_json_error( null, 403 );
+        }
+        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- JSON; browser_report() reads only ints and booleans from it.
+        $raw    = isset( $_POST['report'] ) && is_string( $_POST['report'] ) ? wp_unslash( $_POST['report'] ) : '';
+        $report = json_decode( $raw, true );
+        $result = Cowboy_MCP_OAuth_Address::browser_report( is_array( $report ) ? $report : [] );
+        Cowboy_MCP_OAuth_Address::maybe_check();
+        wp_send_json_success( [ 'mode' => Cowboy_MCP_OAuth_Address::advertised(), 'switched' => $result['switched'] ] );
+    }
+
+    /**
+     * The Connection Doctor's "Use the other sign-in address" / "Back to automatic" buttons:
+     * stores the override (auto|root|site). Admins only; never reachable by an agent.
+     */
+    public static function ajax_signin_override(): void {
+        if ( ! check_ajax_referer( 'cowboy_mcp_signin_override', false, false ) || ! current_user_can( Cowboy_MCP_Security::admin_capability() ) ) {
+            wp_send_json_error( null, 403 );
+        }
+        $value = sanitize_key( wp_unslash( $_POST['value'] ?? '' ) );
+        $from  = (string) Cowboy_MCP_OAuth_Address::state()['override'];
+        if ( ! Cowboy_MCP_OAuth_Address::set_override( $value ) ) {
+            wp_send_json_error( null, 400 );
+        }
+        Cowboy_MCP_Auth::log( 'oauth_address_override', [ 'args' => [ 'from' => $from, 'to' => $value ] ] );
+        wp_send_json_success( [ 'override' => $value, 'mode' => Cowboy_MCP_OAuth_Address::advertised() ] );
+    }
+
+    /**
+     * cowboyMcpAdmin.signinCheck: the documents to fetch, their expected values, the nonce,
+     * and the panels (browser sign-in) that trigger the check. Null when it must not run.
+     */
+    private static function signin_check_config(): ?array {
+        if ( ! class_exists( 'Cowboy_MCP_OAuth' ) || ! Cowboy_MCP_OAuth::is_enabled() || ! Cowboy_MCP_OAuth_Address::pretty_permalinks() ) {
+            return null;
+        }
+        $targets = Cowboy_MCP_OAuth_Address::browser_check_targets();
+        if ( null === $targets ) {
+            return null;
+        }
+        $panels = [];
+        foreach ( Cowboy_MCP_Admin_Connections::client_registry() as $slug => $c ) {
+            $type = (string) ( $c['type'] ?? '' );
+            if ( str_starts_with( $type, 'oauth' ) || 'n8n' === $type ) {
+                $panels[] = (string) $slug;
+            }
+        }
+        return $targets + [ 'nonce' => wp_create_nonce( Cowboy_MCP_OAuth_Address::BROWSER_NONCE ), 'panels' => $panels ];
     }
 
     public static function enqueue_assets( string $hook ): void {
@@ -210,7 +272,7 @@ class Cowboy_MCP_Admin {
             $js_ver,
             true
         );
-        wp_localize_script( 'cowboy-mcp-admin', 'cowboyMcpAdmin', [
+        $admin_l10n = [
             'ajaxUrl'      => admin_url( 'admin-ajax.php' ),
             'dismissNonce' => wp_create_nonce( 'cowboy_mcp_dismiss_new_key' ),
             'statusNonce'  => wp_create_nonce( 'cowboy_mcp_connect_status' ),
@@ -223,7 +285,12 @@ class Cowboy_MCP_Admin {
             'copied'       => __( 'Copied!', 'cowboy-mcp' ),
             'copyFailed'   => __( 'Failed to copy', 'cowboy-mcp' ),
             'scopeMissing' => __( 'Not currently available (kept in this scope until you untick them)', 'cowboy-mcp' ),
-        ] );
+        ];
+        $signin = 'connection' === self::active_tab() ? self::signin_check_config() : null;
+        if ( null !== $signin ) {
+            $admin_l10n['signinCheck'] = $signin;
+        }
+        wp_localize_script( 'cowboy-mcp-admin', 'cowboyMcpAdmin', $admin_l10n );
         wp_localize_script( 'cowboy-mcp-admin', 'cowboyMcpDoctor', [
             'ajaxUrl' => admin_url( 'admin-ajax.php' ),
             'nonce'   => wp_create_nonce( 'cowboy_mcp_doctor' ),
@@ -242,7 +309,13 @@ class Cowboy_MCP_Admin {
                     'fail'  => _x( 'fail', 'connection check result', 'cowboy-mcp' ),
                     'error' => _x( 'error', 'connection check result', 'cowboy-mcp' ),
                     'skip'  => _x( 'skipped', 'connection check result', 'cowboy-mcp' ),
+                    'info'  => _x( 'info', 'connection check result', 'cowboy-mcp' ),
                 ],
+                'signinOther'  => __( 'Use the other sign-in address', 'cowboy-mcp' ),
+                'signinAuto'   => __( 'Back to automatic', 'cowboy-mcp' ),
+                'signinWarn'   => __( 'Some connected apps may need to sign in again after this change.', 'cowboy-mcp' ),
+                'signinSaved'  => __( 'Saved. Run the checks again to see the result.', 'cowboy-mcp' ),
+                'signinFailed' => __( 'Could not save the change. Reload the page and try again.', 'cowboy-mcp' ),
                 'summary'      => [
                     /* translators: %d: number of checks */
                     'fail'  => __( 'Failed: %d', 'cowboy-mcp' ),
@@ -548,7 +621,7 @@ class Cowboy_MCP_Admin {
 
     /**
      * Map posted key_scope_mode/allowed_tools[] fields to a scope array.
-     * Returns null for full access, an array for read_only/custom, or false
+     * Returns null for full access, an array for read_only/drafts/custom, or false
      * (an "invalid" sentinel) when key_scope_mode is missing or unrecognized —
      * callers must treat false as "reject the submission", never as "full".
      */
@@ -564,6 +637,9 @@ class Cowboy_MCP_Admin {
         }
         if ( 'read_only' === $mode ) {
             return [ 'mode' => 'read_only' ];
+        }
+        if ( 'drafts' === $mode ) {
+            return [ 'mode' => 'drafts', 'allowed_tools' => [] ];
         }
         if ( 'custom' === $mode ) {
             // phpcs:ignore WordPress.Security.NonceVerification.Missing
@@ -584,6 +660,7 @@ class Cowboy_MCP_Admin {
         }
         $s['oauth_enabled'] = true;
         update_option( 'cowboy_mcp_settings', $s );
+        Cowboy_MCP_Tools::forget_settings(); // the rest of this request (start_connect's answer) sees sign-in on
         Cowboy_MCP_OAuth::open_registration_window();
         if ( '' !== $notice ) {
             add_settings_error( 'cowboy_mcp', 'oauth_on', $notice, 'success' );

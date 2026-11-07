@@ -1075,12 +1075,12 @@ class Cowboy_MCP_OAuth {
     }
 
     /**
-     * Exchange a refresh token for a new pair, rotating (single-use) the old one.
-     * Reuse of an already-used refresh token revokes the whole connection.
+     * Look a refresh token up: `cmcp_rt_<id>.<secret>`, the id in REFRESH_OPTION and the
+     * secret matching its hash. Shared by rotate_refresh_token() and the /token fallback marker.
      *
-     * @return array{access_token:string,refresh_token:string,expires_in:int,scope:?string}|WP_Error
+     * @return array{0:string,1:array,2:array}|WP_Error [ id, record, every refresh record ]
      */
-    public static function rotate_refresh_token( string $token, string $client_id ): array|WP_Error {
+    private static function refresh_record( string $token ): array|WP_Error {
         if ( ! str_starts_with( $token, 'cmcp_rt_' ) ) {
             return new WP_Error( 'invalid_grant', 'Not a refresh token.' );
         }
@@ -1091,14 +1091,29 @@ class Cowboy_MCP_OAuth {
         [ $id, $secret ] = $parts;
 
         $refresh = get_option( self::REFRESH_OPTION, [] );
-        if ( empty( $refresh[ $id ] ) ) {
+        if ( ! is_array( $refresh ) || empty( $refresh[ $id ] ) || ! is_array( $refresh[ $id ] ) ) {
             return new WP_Error( 'invalid_grant', 'Unknown refresh token.' );
         }
         $rec = $refresh[ $id ];
 
-        if ( ! hash_equals( (string) $rec['secret_hash'], hash( 'sha256', $secret ) ) ) {
+        if ( ! hash_equals( (string) ( $rec['secret_hash'] ?? '' ), hash( 'sha256', $secret ) ) ) {
             return new WP_Error( 'invalid_grant', 'Refresh token mismatch.' );
         }
+        return [ $id, $rec, $refresh ];
+    }
+
+    /**
+     * Exchange a refresh token for a new pair, rotating (single-use) the old one.
+     * Reuse of an already-used refresh token revokes the whole connection.
+     *
+     * @return array{access_token:string,refresh_token:string,expires_in:int,scope:?string}|WP_Error
+     */
+    public static function rotate_refresh_token( string $token, string $client_id ): array|WP_Error {
+        $found = self::refresh_record( $token );
+        if ( is_wp_error( $found ) ) {
+            return $found;
+        }
+        [ $id, $rec, $refresh ] = $found;
         if ( $client_id !== '' && ! self::row_belongs_to( (string) $rec['client_id'], $client_id ) ) {
             return new WP_Error( 'invalid_grant', 'Client mismatch.' );
         }
@@ -1310,9 +1325,37 @@ class Cowboy_MCP_OAuth {
     /* ── Root dispatch + discovery ─────────────────────────── */
 
     /**
+     * Which sign-in server the current authorize request arrived at: 'root' (today's
+     * /cowboy-mcp-oauth/authorize, issuer = origin) or 'site' (the /wp-json server's
+     * authorize address). Set by handle_root_requests() from the matched path, so a
+     * sign-in that started on one server finishes there whatever is advertised now.
+     */
+    private static string $server = 'root';
+
+    /** Issuer of the server handling the current authorize request (RFC 9207 `iss`). */
+    public static function server_issuer(): string {
+        if ( 'site' === self::$server ) {
+            $site = Cowboy_MCP_OAuth_Address::site_issuer();
+            if ( null !== $site ) {
+                return $site;
+            }
+        }
+        return self::issuer();
+    }
+
+    /** Authorize address of the server handling the current request (consent form action). */
+    private static function server_authorize_url(): string {
+        if ( 'site' === self::$server && null !== Cowboy_MCP_OAuth_Address::site_issuer() ) {
+            return Cowboy_MCP_OAuth_Address::site_authorize_url();
+        }
+        return self::issuer() . Cowboy_MCP_OAuth_Address::home_path() . '/cowboy-mcp-oauth/authorize';
+    }
+
+    /**
      * Serve the root-level OAuth paths that cannot live under /wp-json/:
-     * the two .well-known discovery docs and the interactive /authorize page.
-     * Matched against the raw request path so it is permalink-independent.
+     * the discovery docs and the interactive authorize pages of both sign-in servers.
+     * Matched against the request path below the home path (subfolder sites and
+     * subdirectory subsites get their own), independent of the permalink rules.
      */
     public static function handle_root_requests(): void {
         if ( ! self::is_enabled() ) {
@@ -1324,31 +1367,210 @@ class Cowboy_MCP_OAuth {
             return;
         }
         $path = untrailingslashit( $path );
+        $home = Cowboy_MCP_OAuth_Address::home_path();
+        if ( '' !== $home ) {
+            // Only requests below this site's own path: a subdirectory main site never
+            // answers for its subsites, and the reverse.
+            if ( ! str_starts_with( $path, $home . '/' ) ) {
+                return;
+            }
+            $path = substr( $path, strlen( $home ) );
+        }
 
         if ( $path === '/.well-known/oauth-protected-resource' ) {
+            self::note_root_fetch( $home );
             self::render_protected_resource_metadata();
         } elseif ( $path === '/.well-known/oauth-authorization-server' ) {
+            self::note_root_fetch( $home );
             self::render_as_metadata();
         } elseif ( $path === '/cowboy-mcp-oauth/authorize' ) {
+            self::$server = 'root';
             self::handle_authorize();
+        } elseif ( $path === Cowboy_MCP_OAuth_Address::SITE_AUTHORIZE_PATH ) {
+            if ( null === Cowboy_MCP_OAuth_Address::site_issuer() ) {
+                return; // plain permalinks: the site server does not exist
+            }
+            self::$server = 'site';
+            self::handle_authorize();
+        } elseif ( '' !== $home ) {
+            return;
+        } elseif ( str_starts_with( $path, '/.well-known/' ) ) {
+            // RFC 8414 / RFC 9728 path-insertion forms, answerable only where WordPress
+            // owns the domain root.
+            $site = Cowboy_MCP_OAuth_Address::site_issuer();
+            if ( null !== $site ) {
+                $site_path = untrailingslashit( (string) wp_parse_url( $site, PHP_URL_PATH ) );
+                if ( $path === '/.well-known/oauth-authorization-server' . $site_path || $path === '/.well-known/openid-configuration' . $site_path ) {
+                    self::note_root_fetch( $home );
+                    self::emit_json( self::as_metadata( 'site' ) );
+                }
+            }
+            $endpoint_path = untrailingslashit( (string) wp_parse_url( self::resource_url(), PHP_URL_PATH ) );
+            if ( '' !== $endpoint_path && $path === '/.well-known/oauth-protected-resource' . $endpoint_path ) {
+                self::note_root_fetch( $home );
+                self::render_protected_resource_metadata();
+            }
+        } elseif ( $path === '/authorize' || $path === '/token' || $path === '/register' ) {
+            self::handle_plain_fallback( $path );
         }
     }
 
-    public static function render_protected_resource_metadata(): void {
-        self::emit_json( [
+    /**
+     * Real-traffic signal: a document under the domain root's /.well-known/ is being served
+     * (proof that path reaches WordPress). Not recorded for subfolder sites and subsites,
+     * whose /.well-known/ is not the origin's.
+     */
+    private static function note_root_fetch( string $home ): void {
+        if ( '' === $home ) {
+            Cowboy_MCP_OAuth_Address::note_root_fetch();
+        }
+    }
+
+    /* ── Plain fallback addresses ──────────────────────────── */
+
+    /**
+     * When an app finds no authorization-server document it builds the endpoints from
+     * the domain root (/authorize, /token, /register; MCP TypeScript SDK). Those paths
+     * may belong to the site (a page) or to another OAuth server on it, so only a
+     * request that is unmistakably OAuth AND carries something Cowboy issued is
+     * answered; everything else returns here and WordPress carries on.
+     */
+    private static function handle_plain_fallback( string $path ): void {
+        $method = isset( $_SERVER['REQUEST_METHOD'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) ) : 'GET';
+        if ( '/authorize' === $path ) {
+            // phpcs:ignore WordPress.Security.NonceVerification.Recommended, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- OAuth authorization request; each value is type-checked and sanitized by the marker and the handler.
+            if ( 'GET' === $method && self::fallback_marker_authorize( wp_unslash( $_GET ) ) ) {
+                self::$server = 'root';
+                self::handle_authorize();
+            }
+            return;
+        }
+        if ( 'POST' !== $method ) {
+            return;
+        }
+        $type = isset( $_SERVER['CONTENT_TYPE'] ) ? strtolower( sanitize_text_field( wp_unslash( $_SERVER['CONTENT_TYPE'] ) ) ) : '';
+        $raw  = (string) WP_REST_Server::get_raw_data();
+        if ( '/token' === $path ) {
+            if ( ! str_starts_with( $type, 'application/x-www-form-urlencoded' ) ) {
+                return;
+            }
+            $params = [];
+            wp_parse_str( $raw, $params );
+            if ( ! self::fallback_marker_token( $params ) ) {
+                return;
+            }
+            $request = new WP_REST_Request( 'POST', '/cowboy-mcp/v1/oauth/token' );
+            $request->set_header( 'content-type', $type );
+            $request->set_body( $raw );
+            $request->set_body_params( $params );
+            self::emit_rest_response( self::handle_token( $request ) );
+        }
+        if ( '/register' === $path ) {
+            if ( ! str_starts_with( $type, 'application/json' ) ) {
+                return;
+            }
+            $body = json_decode( $raw, true );
+            if ( ! is_array( $body ) || ! array_key_exists( 'redirect_uris', $body ) || ! self::fallback_marker_register() ) {
+                return;
+            }
+            $request = new WP_REST_Request( 'POST', '/cowboy-mcp/v1/oauth/register' );
+            $request->set_header( 'content-type', $type );
+            $request->set_body( $raw );
+            self::emit_rest_response( self::handle_register( $request ) );
+        }
+    }
+
+    /** A GET authorization request (response_type=code + PKCE) naming a client Cowboy knows, for Cowboy's resource. */
+    private static function fallback_marker_authorize( array $q ): bool {
+        foreach ( [ 'client_id', 'redirect_uri', 'code_challenge' ] as $k ) {
+            if ( ! is_string( $q[ $k ] ?? null ) || '' === $q[ $k ] ) {
+                return false;
+            }
+        }
+        if ( 'code' !== ( $q['response_type'] ?? null ) ) {
+            return false;
+        }
+        // A client id can be shared by every MCP server (claude.ai's CIMD document is), so a
+        // request naming another server's resource is not Cowboy's even when the id resolves.
+        $resource = $q['resource'] ?? null;
+        if ( null !== $resource && ( ! is_string( $resource ) || ! self::resource_matches( esc_url_raw( $resource, [ 'https', 'http' ] ) ) ) ) {
+            return false;
+        }
+        $client_id = sanitize_text_field( $q['client_id'] ); // as handle_authorize() reads it
+        if ( null !== self::resolve_client( $client_id ) ) { // a stored row or a valid signed id
+            return true;
+        }
+        return self::is_cimd_client_id( $client_id ) && self::cimd_host_allowed( (string) wp_parse_url( $client_id, PHP_URL_HOST ) );
+    }
+
+    /** A token request whose code or refresh token Cowboy issued (no writes; the handler does the rest). */
+    private static function fallback_marker_token( array $p ): bool {
+        $grant = $p['grant_type'] ?? null;
+        if ( 'authorization_code' === $grant ) {
+            $code = $p['code'] ?? null;
+            return is_string( $code ) && preg_match( '/^[A-Za-z0-9]{1,128}$/', $code )
+                && false !== get_transient( self::CODE_PREFIX . $code );
+        }
+        if ( 'refresh_token' === $grant ) {
+            // The lookup rotate_refresh_token() uses: id + secret hash.
+            $token = $p['refresh_token'] ?? null;
+            return is_string( $token ) && ! is_wp_error( self::refresh_record( $token ) );
+        }
+        return false;
+    }
+
+    /** Registration is Cowboy's only while its window is open (an administrator just clicked Add/Connect). */
+    private static function fallback_marker_register(): bool {
+        return self::registration_open();
+    }
+
+    /** Send a handler's REST response as a standalone JSON document and exit. */
+    private static function emit_rest_response( $response ): void {
+        $response = rest_ensure_response( $response );
+        if ( is_wp_error( $response ) ) {
+            $response = self::rest_error( 'server_error', $response->get_error_message(), 500 );
+        }
+        status_header( $response->get_status() );
+        header( 'Content-Type: application/json; charset=utf-8' );
+        foreach ( $response->get_headers() as $name => $value ) {
+            header( $name . ': ' . $value );
+        }
+        header( 'Cache-Control: no-store' );
+        echo wp_json_encode( $response->get_data() ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+        exit;
+    }
+
+    /** RFC 9728 document. It names one authorization server: the advertised one. */
+    public static function prm_document(): array {
+        return [
             'resource'                 => self::resource_url(),
-            'authorization_servers'    => [ self::issuer() ],
+            'authorization_servers'    => [ Cowboy_MCP_OAuth_Address::advertised_issuer() ],
             'bearer_methods_supported' => [ 'header' ],
             'scopes_supported'         => [ 'mcp' ],
             'resource_documentation'   => 'https://cowboymcp.com',
-        ] );
+        ];
     }
 
-    public static function render_as_metadata(): void {
-        $issuer = self::issuer();
-        self::emit_json( [
+    /** Where WWW-Authenticate sends clients: the root PRM, or its dot-free REST copy in site mode. */
+    public static function prm_url(): string {
+        if ( 'site' === Cowboy_MCP_OAuth_Address::advertised() && null !== Cowboy_MCP_OAuth_Address::site_issuer() ) {
+            return rest_url( 'cowboy-mcp/v1/oauth/protected-resource' );
+        }
+        return self::issuer() . '/.well-known/oauth-protected-resource';
+    }
+
+    /**
+     * Authorization-server metadata. 'root' = today's document, unchanged. 'site' = the
+     * server under /wp-json: its own issuer and authorize address, the shared token and
+     * registration endpoints, plus the fields OpenID discovery parsers require (there are
+     * no ID tokens; the key set is empty).
+     */
+    public static function as_metadata( string $server ): array {
+        $site = 'site' === $server ? Cowboy_MCP_OAuth_Address::site_issuer() : null;
+        $issuer = $site ?? self::issuer();
+        $doc = [
             'issuer'                                => $issuer,
-            'authorization_endpoint'                => $issuer . '/cowboy-mcp-oauth/authorize',
+            'authorization_endpoint'                => null !== $site ? Cowboy_MCP_OAuth_Address::site_authorize_url() : $issuer . '/cowboy-mcp-oauth/authorize',
             'token_endpoint'                        => rest_url( 'cowboy-mcp/v1/oauth/token' ),
             'registration_endpoint'                 => rest_url( 'cowboy-mcp/v1/oauth/register' ),
             'response_types_supported'              => [ 'code' ],
@@ -1360,7 +1582,21 @@ class Cowboy_MCP_OAuth {
             'client_id_metadata_document_supported' => true,
             // RFC 9207: `iss` is sent on every authorization response (clients that see this flag reject responses without it).
             'authorization_response_iss_parameter_supported' => true,
-        ] );
+        ];
+        if ( null !== $site ) {
+            $doc['jwks_uri']                              = rest_url( 'cowboy-mcp/v1/oauth/jwks' );
+            $doc['subject_types_supported']               = [ 'public' ];
+            $doc['id_token_signing_alg_values_supported'] = [ 'RS256' ];
+        }
+        return $doc;
+    }
+
+    public static function render_protected_resource_metadata(): void {
+        self::emit_json( self::prm_document() );
+    }
+
+    public static function render_as_metadata(): void {
+        self::emit_json( self::as_metadata( 'root' ) );
     }
 
     public static function register_routes(): void {
@@ -1374,6 +1610,63 @@ class Cowboy_MCP_OAuth {
             'callback'            => [ __CLASS__, 'handle_token' ],
             'permission_callback' => '__return_true',
         ] );
+        // The site sign-in server's discovery documents (issuer = rest_url( 'cowboy-mcp/v1' )).
+        foreach ( [ '/.well-known/openid-configuration', '/.well-known/oauth-authorization-server' ] as $route ) {
+            register_rest_route( 'cowboy-mcp/v1', $route, [
+                'methods'             => 'GET',
+                'callback'            => [ __CLASS__, 'rest_site_metadata' ],
+                'permission_callback' => '__return_true',
+            ] );
+        }
+        register_rest_route( 'cowboy-mcp/v1', '/oauth/protected-resource', [
+            'methods'             => 'GET',
+            'callback'            => [ __CLASS__, 'rest_protected_resource' ],
+            'permission_callback' => '__return_true',
+        ] );
+        // The resource's own path + /.well-known/oauth-protected-resource: where clients look when the PRM the
+        // 401 names cannot be loaded (ChatGPT, seen live 2026-11-06 behind a /.well-known/ block). It names the
+        // site server, the only one such a client can still reach; SDK apps that reach the root PRM never come here.
+        register_rest_route( 'cowboy-mcp/v1', '/endpoint/.well-known/oauth-protected-resource', [
+            'methods'             => 'GET',
+            'callback'            => [ __CLASS__, 'rest_endpoint_protected_resource' ],
+            'permission_callback' => '__return_true',
+        ] );
+        register_rest_route( 'cowboy-mcp/v1', '/oauth/jwks', [
+            'methods'             => 'GET',
+            'callback'            => [ __CLASS__, 'rest_jwks' ],
+            'permission_callback' => '__return_true',
+        ] );
+    }
+
+    public static function rest_site_metadata(): WP_REST_Response {
+        if ( ! self::is_enabled() || null === Cowboy_MCP_OAuth_Address::site_issuer() ) {
+            return self::rest_error( 'oauth_disabled', 'OAuth connector is not enabled.', 404 );
+        }
+        return self::rest_json( self::as_metadata( 'site' ) );
+    }
+
+    public static function rest_protected_resource(): WP_REST_Response {
+        if ( ! self::is_enabled() ) {
+            return self::rest_error( 'oauth_disabled', 'OAuth connector is not enabled.', 404 );
+        }
+        return self::rest_json( self::prm_document() );
+    }
+
+    /** The endpoint-relative PRM: like prm_document(), naming the site server (404 without one: plain permalinks). */
+    public static function rest_endpoint_protected_resource(): WP_REST_Response {
+        $site = Cowboy_MCP_OAuth_Address::site_issuer();
+        if ( ! self::is_enabled() || null === $site ) {
+            return self::rest_error( 'oauth_disabled', 'OAuth connector is not enabled.', 404 );
+        }
+        return self::rest_json( [ 'authorization_servers' => [ $site ] ] + self::prm_document() );
+    }
+
+    /** Empty key set: no ID tokens are issued; OpenID discovery parsers require the URL. */
+    public static function rest_jwks(): WP_REST_Response {
+        if ( ! self::is_enabled() ) {
+            return self::rest_error( 'oauth_disabled', 'OAuth connector is not enabled.', 404 );
+        }
+        return self::rest_json( [ 'keys' => [] ] );
     }
 
     /* ── Dynamic Client Registration (RFC 7591) ────────────── */
@@ -1788,11 +2081,13 @@ class Cowboy_MCP_OAuth {
             $current_mode = $clients[ $row_key ]['tool_scope']['mode'] ?? 'full';
             if ( 'read_only' === $scope_mode ) {
                 $clients[ $row_key ]['tool_scope'] = [ 'mode' => 'read_only', 'allowed_tools' => [] ];
+            } elseif ( 'drafts' === $scope_mode ) {
+                $clients[ $row_key ]['tool_scope'] = [ 'mode' => 'drafts', 'allowed_tools' => [] ];
             } elseif ( 'keep_custom' === $scope_mode && 'custom' === $current_mode ) {
                 // Re-consent without touching the existing custom scope.
             } else {
                 // Latest consent wins: an earlier read-only/custom grant is
-                // replaced by this full-access approval. A stale "keep_custom"
+                // replaced by this full-access approval (read-only and drafts have their own branches). A stale "keep_custom"
                 // posted against a scope that is no longer custom falls back to
                 // full, fail-safe, rather than silently discarding nothing.
                 unset( $clients[ $row_key ]['tool_scope'] );
@@ -1802,7 +2097,7 @@ class Cowboy_MCP_OAuth {
             update_option( self::CLIENTS_OPTION, $clients, false );
 
             $sep = ( strpos( $redirect_uri, '?' ) === false ) ? '?' : '&';
-            $loc = $redirect_uri . $sep . http_build_query( [ 'code' => $code, 'state' => $state, 'iss' => self::issuer() ] );
+            $loc = $redirect_uri . $sep . http_build_query( [ 'code' => $code, 'state' => $state, 'iss' => self::server_issuer() ] );
             wp_redirect( $loc ); // phpcs:ignore WordPress.Security.SafeRedirect.wp_redirect_wp_redirect -- redirect_uri validated against the registered client
             exit;
         }
@@ -1815,13 +2110,13 @@ class Cowboy_MCP_OAuth {
         // sanitize_text_field() strips those octets and corrupts redirect_uri/resource
         // when the authorization flow round-trips through wp-login.php.
         // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Preserve encoded OAuth query values; the complete URL is sanitized below.
-        $uri = isset( $_SERVER['REQUEST_URI'] ) ? wp_unslash( (string) $_SERVER['REQUEST_URI'] ) : '/cowboy-mcp-oauth/authorize';
+        $uri = isset( $_SERVER['REQUEST_URI'] ) ? wp_unslash( (string) $_SERVER['REQUEST_URI'] ) : (string) wp_parse_url( self::server_authorize_url(), PHP_URL_PATH );
         return esc_url_raw( self::issuer() . $uri, [ 'https', 'http' ] );
     }
 
     private static function authorize_redirect_error( string $redirect_uri, string $state, string $error, string $desc ): void {
         $sep = ( strpos( $redirect_uri, '?' ) === false ) ? '?' : '&';
-        $loc = $redirect_uri . $sep . http_build_query( [ 'error' => $error, 'error_description' => $desc, 'state' => $state, 'iss' => self::issuer() ] );
+        $loc = $redirect_uri . $sep . http_build_query( [ 'error' => $error, 'error_description' => $desc, 'state' => $state, 'iss' => self::server_issuer() ] );
         wp_redirect( $loc ); // phpcs:ignore WordPress.Security.SafeRedirect.wp_redirect_wp_redirect -- redirect_uri validated against the registered client
         exit;
     }
@@ -1859,7 +2154,7 @@ class Cowboy_MCP_OAuth {
         $site_name   = get_bloginfo( 'name' );
         $client_name = $client['client_name'] ?? __( 'An application', 'cowboy-mcp' );
         $user        = wp_get_current_user();
-        $action      = esc_url( self::issuer() . '/cowboy-mcp-oauth/authorize' );
+        $action      = esc_url( self::server_authorize_url() );
         $dest_host   = (string) wp_parse_url( $redirect_uri, PHP_URL_HOST );
 
         // Preselect the radio matching the client's currently stored scope so
@@ -1961,6 +2256,10 @@ wp_print_styles( 'cowboy-mcp-oauth-consent' );
         <label>
             <input type="radio" name="cowboy_mcp_oauth_scope_mode" value="read_only" <?php checked( ! $is_custom && 'read_only' === $stored_mode ); ?>>
             <?php esc_html_e( 'Read-only — inspect the site, make no changes', 'cowboy-mcp' ); ?>
+        </label>
+        <label>
+            <input type="radio" name="cowboy_mcp_oauth_scope_mode" value="drafts" <?php checked( ! $is_custom && 'drafts' === $stored_mode ); ?>>
+            <?php esc_html_e( 'Drafts only — write drafts and propose changes; you publish', 'cowboy-mcp' ); ?>
         </label>
     </fieldset>
     <div class="actions">

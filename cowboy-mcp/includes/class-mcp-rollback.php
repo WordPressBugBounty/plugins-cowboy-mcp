@@ -60,6 +60,15 @@ class Cowboy_MCP_Rollback {
 	 */
 	private const PING_META = [ '_encloseme', '_pingme' ];
 
+	/**
+	 * The draft-copy links a drafts-only connection writes onto a live ORIGINAL when it
+	 * makes a copy: Cowboy MCP's own, and Yoast Duplicate Post's "has a copy" marker.
+	 * Not the original's data: snapshots leave them out (a new copy is never a conflict
+	 * for an earlier edit's undo) and restore_post() leaves the live rows alone (an undo
+	 * never unlinks or orphans a copy). The keys on a copy itself are its own state.
+	 */
+	private const LINK_META = [ '_cowboy_mcp_draft_copy', '_dp_has_rewrite_republish_copy' ];
+
 	/** Real columns of {$wpdb->comments}; get_comment( …, ARRAY_A ) adds children, populated_children, post_fields. */
 	private const COMMENT_COLUMNS = [
 		'comment_ID', 'comment_post_ID', 'comment_author', 'comment_author_email', 'comment_author_url',
@@ -579,7 +588,7 @@ class Cowboy_MCP_Rollback {
 				return [ 'value' => $v ];
 
 			case 'seo_row': {
-				if ( ! get_post( (int) $id ) ) {
+				if ( (int) $id < 1 || ! get_post( (int) $id ) ) { // get_post( 0 ) is the global post
 					return null;
 				}
 				global $wpdb;
@@ -598,13 +607,13 @@ class Cowboy_MCP_Rollback {
 
 			case 'post':
 			case 'media':
-				$post = get_post( (int) $id, ARRAY_A );
+				$post = (int) $id > 0 ? get_post( (int) $id, ARRAY_A ) : null; // get_post( 0 ) is the global post
 				if ( ! $post ) {
 					return null;
 				}
 				$meta = get_post_meta( (int) $id );
 				unset( $meta['_edit_lock'], $meta['_edit_last'] ); // volatile; false conflicts
-				$meta = array_diff_key( $meta, array_flip( self::PING_META ) );
+				$meta = array_diff_key( $meta, array_flip( self::PING_META ), array_flip( self::LINK_META ) );
 				$terms = [];
 				foreach ( get_object_taxonomies( $post['post_type'] ) as $tax ) {
 					$t = wp_get_object_terms( (int) $id, $tax, [ 'fields' => 'ids' ] );
@@ -1063,7 +1072,7 @@ class Cowboy_MCP_Rollback {
 	 * through objects (map_deep), but wp_slash() leaves objects untouched, so
 	 * stdClass meta (e.g. Beaver Builder layouts) would lose every backslash.
 	 */
-	private static function slash_deep( $value ) {
+	public static function slash_deep( $value ) {
 		if ( is_object( $value ) ) {
 			$value = clone $value;
 			foreach ( get_object_vars( $value ) as $k => $v ) {
@@ -1123,10 +1132,11 @@ class Cowboy_MCP_Rollback {
 		$live_id = (int) $result;
 
 		// Meta: clear current, re-add captured (values are stored serialized-raw arrays).
-		// The ping queue stays as core left it; journal rows from before 1.7.5 still carry it.
-		$meta = array_diff_key( (array) $state['meta'], array_flip( self::PING_META ) );
+		// The ping queue stays as core left it (journal rows from before 1.7.5 still carry
+		// it), and so do the draft-copy links (LINK_META).
+		$meta = array_diff_key( (array) $state['meta'], array_flip( self::PING_META ), array_flip( self::LINK_META ) );
 		foreach ( array_keys( get_post_meta( $live_id ) ) as $k ) {
-			if ( ! in_array( $k, self::PING_META, true ) ) {
+			if ( ! in_array( $k, self::PING_META, true ) && ! in_array( $k, self::LINK_META, true ) ) {
 				delete_post_meta( $live_id, $k );
 			}
 		}
@@ -1799,13 +1809,21 @@ class Cowboy_MCP_Rollback {
 			$pre_undo     = self::snapshot( $type, $id );
 			$current_hash = self::state_hash( $pre_undo );
 		}
+		// The creation of a drafts-only connection's draft copy is hashed without
+		// post_modified*: undoing the edit made with it re-stamps them (draft_copy_hash()).
+		$copy_of = ( 'post' === $type && 'create' === $row['action'] && 'wp_create_post' === $row['tool'] && class_exists( 'Cowboy_MCP_Drafts' ) )
+			? Cowboy_MCP_Drafts::original_of( (int) $id )
+			: 0;
 		if ( ! $force && $row['after_hash'] !== null && $row['after_hash'] !== '' && $current_hash !== $row['after_hash']
-			&& ! self::legacy_ping_hash_matches( $type, $pre_undo, (string) $row['after_hash'] ) ) {
+			&& ! self::legacy_ping_hash_matches( $type, $pre_undo, (string) $row['after_hash'] )
+			&& ! ( $copy_of > 0 && hash_equals( (string) $row['after_hash'], self::draft_copy_hash( $pre_undo ) ) ) ) {
 			return new WP_Error(
 				'undo_conflict',
 				"Conflict: '{$row['object_label']}' ({$type} {$id}) has been modified since change #{$change_id} was made. "
 					. 'Undoing now would clobber the later change.',
-				[ 'suggestion' => 'Inspect the object, then resend with force: true to undo anyway.' ]
+				[ 'suggestion' => ( class_exists( 'Cowboy_MCP_Drafts' ) && Cowboy_MCP_Drafts::active() )
+					? 'Undo the later change first, or pass both change ids in change_ids. A drafts-only connection cannot force an undo.'
+					: 'Inspect the object, then resend with force: true to undo anyway.' ]
 			);
 		}
 
@@ -1827,6 +1845,11 @@ class Cowboy_MCP_Rollback {
 				$row['before_state']['rows'] ?? []
 			);
 			$pre_undo = [ 'rows' => $swapped ];
+		}
+		if ( $copy_of > 0 && is_array( $pre_undo ) ) {
+			// The original's link to the copy is not post state (LINK_META), so a redo would
+			// re-create the copy with nothing pointing at it; mark it for undo_policy(). `_volatile` is never hashed or compared.
+			$pre_undo['_volatile'] = [ 'draft_copy_of' => $copy_of ];
 		}
 		$after_undo      = $type === 'db_rows'
 			? [ 'values' => self::db_rows_current_values( $row['before_state']['rows'] ?? [] ) ]
@@ -1922,6 +1945,12 @@ class Cowboy_MCP_Rollback {
 			$tool = (string) ( $origin['tool'] ?? '' );
 			if ( 'wp_undo_change' === $tool || ! Cowboy_MCP_Tools::tool_permitted( $tool ) ) {
 				return new WP_Error( 'tool_scope_denied', "This credential's scope does not include {$tool}, which made change #{$row['id']}; it cannot undo that change." );
+			}
+		}
+		if ( class_exists( 'Cowboy_MCP_Drafts' ) && Cowboy_MCP_Drafts::active() ) {
+			$b = Cowboy_MCP_Drafts::undo_block( $row, $force );
+			if ( $b ) {
+				return $b;
 			}
 		}
 
@@ -2170,6 +2199,18 @@ class Cowboy_MCP_Rollback {
 	}
 
 	/**
+	 * The after_hash of a drafts-only draft copy's CREATE row: the copy as made,
+	 * post_modified* left out. Undoing the edit that made the copy restores that
+	 * state but re-stamps the modified time, which must not block undoing the creation.
+	 */
+	public static function draft_copy_hash( ?array $state ): string {
+		if ( is_array( $state ) && isset( $state['post'] ) && is_array( $state['post'] ) ) {
+			unset( $state['post']['post_modified'], $state['post']['post_modified_gmt'] );
+		}
+		return self::state_hash( $state );
+	}
+
+	/**
 	 * After an undo, compare the live state with the before-state it restored.
 	 * Returns [ 'verified' => bool|null, 'differences' => string[] ]; null means the
 	 * type has no comparable snapshot (raw db rows). Fields WordPress rewrites on
@@ -2227,7 +2268,7 @@ class Cowboy_MCP_Rollback {
 			unset( $state['post']['post_modified'], $state['post']['post_modified_gmt'] );
 			// Before-states journaled by 1.7.4 and earlier still include the ping queue.
 			if ( isset( $state['meta'] ) && is_array( $state['meta'] ) ) {
-				$state['meta'] = array_diff_key( $state['meta'], array_flip( self::PING_META ) );
+				$state['meta'] = array_diff_key( $state['meta'], array_flip( self::PING_META ), array_flip( self::LINK_META ) );
 			}
 			// A draft with no fixed date (zero post_date_gmt) gets post_date = now on every save.
 			if ( ( $state['post']['post_date_gmt'] ?? '' ) === '0000-00-00 00:00:00' ) {

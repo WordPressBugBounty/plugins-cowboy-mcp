@@ -92,8 +92,9 @@ class Cowboy_MCP_Resources {
             return true;
         }
         if ( null === $tool ) {
+            // Unscoped, or a mode whose reads include options; an unknown mode fails closed.
             $scope = Cowboy_MCP_Security::current_scope();
-            return null === $scope || 'custom' !== ( $scope['mode'] ?? 'custom' );
+            return null === $scope || in_array( $scope['mode'] ?? '', [ 'full', 'read_only', 'drafts' ], true );
         }
         return Cowboy_MCP_Tools::tool_permitted( $tool );
     }
@@ -657,7 +658,18 @@ class Cowboy_MCP_Resources {
     private static function resource_single_post( int $id ) {
         $post = get_post( $id );
         if ( ! $post ) return null;
-        return [
+        // Drafts-only connections read the draft copy of a live post, flagged.
+        $draft_copy = null;
+        if ( class_exists( 'Cowboy_MCP_Drafts' ) && Cowboy_MCP_Drafts::active() ) {
+            $copy = Cowboy_MCP_Drafts::find_copy( $id );
+            if ( $copy ) {
+                $draft_copy = Cowboy_MCP_Drafts::read_flag( $id, (int) $copy->ID );
+                $post       = $copy;
+            } elseif ( Cowboy_MCP_Drafts::original_of( $id ) > 0 ) {
+                $draft_copy = Cowboy_MCP_Drafts::read_flag( Cowboy_MCP_Drafts::original_of( $id ), $id, false );
+            }
+        }
+        $out = [
             'ID'        => $post->ID,
             'title'     => $post->post_title,
             'slug'      => $post->post_name,
@@ -670,6 +682,11 @@ class Cowboy_MCP_Resources {
             'author'    => get_the_author_meta( 'display_name', $post->post_author ),
             'permalink' => get_permalink( $id ),
         ];
+        if ( $draft_copy ) {
+            $out['draft_copy'] = $draft_copy['draft_copy'];
+            $out['note']       = $draft_copy['note'];
+        }
+        return $out;
     }
 
     private static function resource_single_option( string $name ) {

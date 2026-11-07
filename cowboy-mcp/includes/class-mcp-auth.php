@@ -13,6 +13,14 @@ class Cowboy_MCP_Auth {
     const OPTION_KEY = 'cowboy_mcp_api_keys';
 
     /**
+     * Second header that carries the same credential as `Authorization: Bearer …`, for hosts
+     * that strip Authorization before PHP and for sites behind an HTTP Basic login (whose
+     * Authorization header is the site password). Read only when no Bearer Authorization
+     * header arrived, so existing connections behave exactly as before.
+     */
+    const KEY_HEADER = 'X-Cowboy-MCP-Key';
+
+    /**
      * Side store for the MCP clientInfo each credential last presented (autoload no):
      * `key:<key id>` / `oauth:<client_id>` => {name, title?, version?, at}. Kept apart from the
      * credential records so the endpoint never rewrites `cowboy_mcp_api_keys` / `cowboy_mcp_oauth_clients`.
@@ -75,7 +83,8 @@ class Cowboy_MCP_Auth {
             'prefix'   => substr( $raw_key, 0, 8 ),  // visible prefix for identification
             'lookup'   => self::key_lookup( $raw_key ),
         ];
-        // Who made it: on multisite a key only works while its creator is a super admin.
+        // Who made it: the key runs as this user, and only while they are an administrator
+        // (a super admin on multisite).
         if ( get_current_user_id() > 0 ) {
             $record['created_by'] = get_current_user_id();
         }
@@ -153,6 +162,9 @@ class Cowboy_MCP_Auth {
         $mode = $scope['mode'] ?? '';
         if ( 'read_only' === $mode ) {
             return [ 'mode' => 'read_only', 'allowed_tools' => [] ];
+        }
+        if ( 'drafts' === $mode ) {
+            return [ 'mode' => 'drafts', 'allowed_tools' => [] ];
         }
         if ( 'custom' === $mode ) {
             $tools = array_values( array_unique( array_filter( array_map(
@@ -268,8 +280,8 @@ class Cowboy_MCP_Auth {
             return new WP_Error( 'mcp_forbidden', 'Origin not allowed.', [ 'status' => 403 ] );
         }
 
-        $auth_header = $request->get_header( 'Authorization' );
-        if ( ! $auth_header || ! str_starts_with( $auth_header, 'Bearer ' ) ) {
+        $token = self::request_token( $request );
+        if ( null === $token ) {
             if ( $preflight ) {
                 return new WP_Error( 'mcp_unauthorized', 'Missing or invalid Authorization header.', [ 'status' => 401 ] );
             }
@@ -281,11 +293,13 @@ class Cowboy_MCP_Auth {
                 'x_forwarded_for' => $request->get_header( 'X-Forwarded-For' ) ?: null,
             ] );
             self::note_auth_failure( $client_ip );
+            if ( class_exists( 'Cowboy_MCP_OAuth_Address' ) ) {
+                Cowboy_MCP_OAuth_Address::note_unauthenticated_401( $request ); // cheap: reads + one transient write, no fetches
+            }
             self::send_www_authenticate();
             return new WP_Error( 'mcp_unauthorized', 'Missing or invalid Authorization header.', [ 'status' => 401 ] );
         }
 
-        $token = substr( $auth_header, 7 );
 
         // ── OAuth access token branch ──
         // OAuth tokens carry a distinct prefix and are validated against the OAuth
@@ -373,7 +387,20 @@ class Cowboy_MCP_Auth {
                 return true;
             }
 
-            // Set current user to admin so WP capabilities work.
+            // Single site: a key runs as the admin who created it (recorded since 1.7.5), so its
+            // calls are attributed to that person and stop working when they lose admin rights,
+            // as OAuth tokens do.
+            $creator = (int) ( $record['created_by'] ?? 0 );
+            if ( $creator > 0 ) {
+                if ( ! Cowboy_MCP_Security::user_is_plugin_admin( $creator ) ) {
+                    self::log( 'auth_key_creator_not_admin', self::$current_key_context );
+                    return new WP_Error( 'mcp_unauthorized', 'The administrator who created this API key no longer has administrator rights. Create a new key in Settings > Cowboy MCP.', [ 'status' => 401 ] );
+                }
+                wp_set_current_user( $creator );
+                return true;
+            }
+
+            // Keys without a recorded creator (made before 1.7.5, or with WP-CLI) run as the first administrator.
             $admins = get_users( [ 'role' => 'administrator', 'number' => 1 ] );
             if ( empty( $admins ) ) {
                 return new WP_Error( 'mcp_no_admin', 'No administrator account found. MCP requires at least one admin user.', [ 'status' => 500 ] );
@@ -459,6 +486,48 @@ class Cowboy_MCP_Auth {
     }
 
     /**
+     * The credential a request carries, or null.
+     *
+     * Order: a Bearer `Authorization` header as WordPress parsed it; the same header from
+     * the server's own list when WordPress saw none (Apache keeps it out of $_SERVER on
+     * some setups); then KEY_HEADER, as `<key>` or `Bearer <key>`. A Bearer Authorization
+     * header always wins, so KEY_HEADER can never override a credential that arrived there.
+     */
+    public static function request_token( WP_REST_Request $request ): ?string {
+        $auth = trim( (string) $request->get_header( 'Authorization' ) );
+        if ( '' === $auth ) {
+            $auth = self::server_authorization_header();
+        }
+        if ( preg_match( '/^Bearer\s+(\S+)$/i', $auth, $m ) ) {
+            return $m[1];
+        }
+        $alt = trim( (string) $request->get_header( self::KEY_HEADER ) );
+        if ( preg_match( '/^(?:Bearer\s+)?(\S+)$/i', $alt, $m ) ) {
+            return $m[1];
+        }
+        return null;
+    }
+
+    /** Authorization as the web server reports it (getallheaders / apache_request_headers), or ''. */
+    private static function server_authorization_header(): string {
+        foreach ( [ 'getallheaders', 'apache_request_headers' ] as $fn ) {
+            if ( ! function_exists( $fn ) ) {
+                continue;
+            }
+            $all = $fn();
+            if ( ! is_array( $all ) ) {
+                continue;
+            }
+            foreach ( $all as $name => $value ) {
+                if ( is_string( $name ) && 0 === strcasecmp( $name, 'Authorization' ) && is_string( $value ) ) {
+                    return trim( $value );
+                }
+            }
+        }
+        return '';
+    }
+
+    /**
      * Emit the RFC 9728 WWW-Authenticate breadcrumb so MCP clients can discover
      * the OAuth metadata. No-op unless the OAuth connector is enabled.
      */
@@ -466,7 +535,7 @@ class Cowboy_MCP_Auth {
         if ( ! class_exists( 'Cowboy_MCP_OAuth' ) || ! Cowboy_MCP_OAuth::is_enabled() || headers_sent() ) {
             return;
         }
-        $prm = Cowboy_MCP_OAuth::issuer() . '/.well-known/oauth-protected-resource';
+        $prm = Cowboy_MCP_OAuth::prm_url();
         header( 'WWW-Authenticate: Bearer resource_metadata="' . esc_url_raw( $prm ) . '"' );
     }
 

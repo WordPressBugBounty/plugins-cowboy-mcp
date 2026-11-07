@@ -203,6 +203,11 @@ class Cowboy_MCP_Tools {
         return self::$settings_cache;
     }
 
+    /** Drop the request cache after this request itself changed the settings row. */
+    public static function forget_settings(): void {
+        self::$settings_cache = null;
+    }
+
     /**
      * Write a structured JSON log line when log_requests is enabled.
      * Delegates to Cowboy_MCP_Auth::log() with key context merged in.
@@ -345,9 +350,13 @@ class Cowboy_MCP_Tools {
         if ( ! Cowboy_MCP_Security::tool_in_scope( $name, $scope_annotations ) ) {
             $scope_mode = Cowboy_MCP_Security::current_scope()['mode'] ?? 'custom';
             self::mcp_log( 'tool_scope_denied', [ 'tool' => $name, 'scope_mode' => $scope_mode ] );
-            $message = ( 'read_only' === $scope_mode )
-                ? "This credential is read-only; {$name} is not a read-only tool."
-                : "This credential's scope does not include {$name}.";
+            if ( 'read_only' === $scope_mode ) {
+                $message = "This credential is read-only; {$name} is not a read-only tool.";
+            } elseif ( 'drafts' === $scope_mode ) {
+                $message = "This credential is drafts-only: it can create drafts and propose changes to live posts as draft copies, but {$name} changes the live site.";
+            } else {
+                $message = "This credential's scope does not include {$name}.";
+            }
             return new WP_Error(
                 'tool_scope_denied',
                 $message . ' Use cowboy_discover to see the tools this credential may call.',
@@ -389,6 +398,23 @@ class Cowboy_MCP_Tools {
             $args = $checked;
         }
 
+        // Drafts-only credentials: judge creates and edit targets before any preview.
+        // A live target is pointed at its draft copy (made here on first use); $drafts_ctx
+        // carries that through to after_success() / abandon().
+        $drafts_ctx = null;
+        if ( class_exists( 'Cowboy_MCP_Drafts' ) && Cowboy_MCP_Drafts::active() ) {
+            $drafts = Cowboy_MCP_Drafts::gate( $name, $args );
+            if ( is_wp_error( $drafts ) ) {
+                $log_id = self::mcp_log( 'tool_call', [ 'tool' => $name, 'args' => $args, 'power_mode' => Cowboy_MCP_Security::power_mode_enabled() ] );
+                return self::tool_error_result( $name, $drafts, $log_id );
+            }
+            if ( null !== $drafts['preview'] ) {
+                return $drafts['preview'];
+            }
+            $args       = $drafts['args'];
+            $drafts_ctx = $drafts['ctx'];
+        }
+
         // Dry-run intercept: preview what the tool would do without executing.
         if ( ! empty( $args['dry_run'] ) ) {
             $annotations = self::$tool_map[ $name ]['annotations'] ?? [];
@@ -402,6 +428,9 @@ class Cowboy_MCP_Tools {
         if ( ! empty( $settings['safe_mode'] ) ) {
             $annotations = self::$tool_map[ $name ]['annotations'] ?? [];
             if ( ! empty( $annotations['destructiveHint'] ) && empty( $args['confirm'] ) ) {
+                if ( null !== $drafts_ctx ) {
+                    Cowboy_MCP_Drafts::abandon( $drafts_ctx );
+                }
                 $preview = self::generate_dry_run_preview( $name, $args );
                 $preview_text = $preview['content'][0]['text'] ?? '';
                 return [
@@ -435,7 +464,15 @@ class Cowboy_MCP_Tools {
                 if ( $capture !== null ) {
                     Cowboy_MCP_Rollback::discard( $capture );
                 }
+                if ( null !== $drafts_ctx ) {
+                    Cowboy_MCP_Drafts::abandon( $drafts_ctx );
+                }
                 return self::tool_error_result( $name, $result, $log_id );
+            }
+
+            // Before commit(): a copy made in this call is journaled ahead of the edit to it.
+            if ( null !== $drafts_ctx ) {
+                $result = Cowboy_MCP_Drafts::after_success( $drafts_ctx, $result );
             }
 
             if ( $capture !== null ) {
@@ -468,6 +505,9 @@ class Cowboy_MCP_Tools {
         } catch ( \Throwable $e ) {
             if ( $capture !== null ) {
                 Cowboy_MCP_Rollback::discard( $capture );
+            }
+            if ( null !== $drafts_ctx ) {
+                Cowboy_MCP_Drafts::abandon( $drafts_ctx );
             }
             self::mcp_log( 'tool_exception', [ 'tool' => $name, 'exception' => $e->getMessage() ] );
             Cowboy_MCP_Audit_Log::set_result( $log_id, 'exception' );
