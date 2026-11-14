@@ -3,7 +3,7 @@
  * Plugin Name: Cowboy MCP
  * Plugin URI:  https://cowboymcp.com
  * Description: Turns your WordPress site into a Model Context Protocol (MCP) server so AI agents like Claude, ChatGPT, Cursor and Claude Code can read, edit, and manage everything on the site - with per-change undo and database checkpoints.
- * Version:     1.7.7
+ * Version:     1.7.8
  * Author:      februality
  * Author URI:  https://profiles.wordpress.org/februality/
  * License:     GPL-2.0-or-later
@@ -41,7 +41,7 @@ along with Cowboy MCP. If not, see https://www.gnu.org/licenses/gpl-2.0.html.
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'COWBOY_MCP_VERSION', '1.7.7' );
+define( 'COWBOY_MCP_VERSION', '1.7.8' );
 define( 'COWBOY_MCP_PATH',    plugin_dir_path( __FILE__ ) );
 define( 'COWBOY_MCP_URL',     plugin_dir_url( __FILE__ ) );
 
@@ -64,6 +64,7 @@ require_once COWBOY_MCP_PATH . 'includes/class-mcp-prompts.php';
 require_once COWBOY_MCP_PATH . 'includes/class-mcp-completion.php';
 require_once COWBOY_MCP_PATH . 'includes/class-mcp-oauth.php';
 require_once COWBOY_MCP_PATH . 'includes/class-mcp-oauth-address.php';
+require_once COWBOY_MCP_PATH . 'includes/class-mcp-auth-header.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin-connections.php';
 require_once COWBOY_MCP_PATH . 'admin/class-mcp-admin-activity.php';
@@ -123,6 +124,9 @@ add_action( 'init', function () {
 add_action( 'init', [ 'Cowboy_MCP_OAuth_Address', 'maybe_schedule_upgrade_check' ] );
 add_action( Cowboy_MCP_OAuth_Address::UPGRADE_HOOK, [ 'Cowboy_MCP_OAuth_Address', 'run_upgrade_check' ] );
 add_action( Cowboy_MCP_Audit_Log::CRON_HOOK, [ 'Cowboy_MCP_OAuth_Address', 'maybe_check' ] );
+
+/* ── Authorization-header probe: when its stored answer is over 3 days old (also checked from the Connections tab) ── */
+add_action( Cowboy_MCP_Audit_Log::CRON_HOOK, [ 'Cowboy_MCP_Auth_Header', 'maybe_refresh' ] );
 
 /* ── Translations ─────────────────────────────────────────── */
 // REQUIRED — do not remove. Plugin Check warns that load_plugin_textdomain()
@@ -214,6 +218,7 @@ function cowboy_mcp_uninstall(): void {
     // Sign-in address: stored decision, version gate, lock row, signals, scheduled check.
     delete_option( 'cowboy_mcp_oauth_address' );
     delete_option( 'cowboy_mcp_oauth_address_ver' );
+    delete_option( 'cowboy_mcp_auth_header' );
     delete_option( 'cowboy_mcp_oauth_address_lock' );
     delete_transient( 'cowboy_mcp_oauth_address_lock' );
     delete_transient( 'cowboy_mcp_signin_root_fetch' );
